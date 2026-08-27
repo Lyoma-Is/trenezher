@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.gstatic.com 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: https: http: blob:; connect-src 'self' https://*.googleapis.com https://*.firebaseio.com wss://*.firebaseio.com https://*.firebaseapp.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com; frame-src 'none'; object-src 'none'; base-uri 'self'; form-action 'self';">
+  <title>Тренажёр для подготовки к аттестации учителей</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="app">
+    <!-- Главная страница -->
+    <div id="home-page" class="page active">
+      <header class="header">
+        <input type="text" id="site-title" class="main-title-input" value="Тренажёр для подготовки к аттестации учителей" onchange="saveSiteTitle(this.value)" onblur="saveSiteTitle(this.value)">
+        <p class="subtitle">Практическая подготовка к квалификационной аттестации педагогических работников</p>
+      </header>
+
+      <main class="main-content">
+        <section class="category-card category-first">
+          <div class="category-header">
+            <span class="category-icon">①</span>
+            <h2>На первую квалификационную категорию</h2>
+          </div>
+
+          <div class="action-row">
+            <button class="btn btn-primary" onclick="startGeneralQuiz('first')">Общие вопросы</button>
+            <div class="input-group">
+              <label for="count-first">Количество вопросов:</label>
+              <input type="number" id="count-first" min="1" max="300" value="20" class="question-count">
+              <span class="hint">от 1 до 300</span>
+            </div>
+          </div>
+          <div class="action-row action-row-sub">
+            <button class="btn btn-outline admin-only" onclick="openManagePage('general', 'first')">+ Добавить вопросы</button>
+            <span class="custom-count admin-only" id="count-general-first"></span>
+          </div>
+
+          <div class="action-row">
+            <button class="btn btn-secondary" onclick="startInformaticsQuiz('first')">Тренажёр по информатике</button>
+            <p class="info-text">40 вопросов: 10 общих + 30 заданий</p>
+          </div>
+          <div class="action-row action-row-sub">
+            <button class="btn btn-outline btn-outline-teal admin-only" onclick="openManagePage('informatics', 'first')">+ Добавить задания</button>
+            <span class="custom-count admin-only" id="count-tasks-first"></span>
+          </div>
+        </section>
+
+        <section class="category-card category-highest">
+          <div class="category-header">
+            <span class="category-icon">★</span>
+            <h2>На высшую квалификационную категорию</h2>
+          </div>
+
+          <div class="action-row">
+            <button class="btn btn-primary" onclick="startGeneralQuiz('highest')">Общие вопросы</button>
+            <div class="input-group">
+              <label for="count-highest">Количество вопросов:</label>
+              <input type="number" id="count-highest" min="1" max="600" value="30" class="question-count">
+              <span class="hint">от 1 до 600</span>
+            </div>
+          </div>
+          <div class="action-row action-row-sub">
+            <button class="btn btn-outline admin-only" onclick="openManagePage('general', 'highest')">+ Добавить вопросы</button>
+            <span class="custom-count admin-only" id="count-general-highest"></span>
+          </div>
+
+          <div class="action-row">
+            <button class="btn btn-secondary" onclick="startInformaticsQuiz('highest')">Тренажёр по информатике</button>
+            <p class="info-text">40 вопросов: 10 общих + 30 заданий</p>
+          </div>
+          <div class="action-row action-row-sub">
+            <button class="btn btn-outline btn-outline-teal admin-only" onclick="openManagePage('informatics', 'highest')">+ Добавить задания</button>
+            <span class="custom-count admin-only" id="count-tasks-highest"></span>
+          </div>
+        </section>
+      </main>
+
+      <section class="extra-section" id="extra-section">
+        <div class="extra-toolbar">
+          <button type="button" class="btn-sm" onclick="addExtraBlock('text')">+ Текст</button>
+          <button type="button" class="btn-sm" onclick="addExtraBlock('link')">+ Ссылка</button>
+        </div>
+        <div id="extra-blocks" class="extra-blocks"></div>
+      </section>
+
+    </div>
+
+    <!-- Страница управления вопросами -->
+    <div id="manage-page" class="page">
+      <header class="manage-header">
+        <button class="btn-back" onclick="goHome()">← На главную</button>
+        <h1 id="manage-title">Мои вопросы</h1>
+      </header>
+
+      <div class="manage-toolbar" id="toolbar-general">
+        <button class="btn btn-primary" id="btn-new-item" onclick="startNewQuestion()">+ Новый вопрос</button>
+        <button class="btn btn-outline btn-danger-outline" onclick="clearAllInSection()">Очистить все</button>
+      </div>
+      <div class="manage-toolbar hidden" id="toolbar-tasks">
+        <button class="btn btn-primary" onclick="addSector()">+ Добавить сектор</button>
+        <button class="btn btn-outline btn-danger-outline" onclick="clearAllInSection()">Очистить все</button>
+      </div>
+      <div id="sectors-list" class="sectors-list hidden"></div>
+
+      <!-- Форма: общие вопросы (тест) -->
+      <div id="question-form" class="question-form hidden">
+        <h2 id="form-heading">Новый вопрос</h2>
+
+        <!-- ===== Общие вопросы ===== -->
+        <div id="form-general">
+          <div class="form-group">
+            <label for="q-text">Текст вопроса</label>
+            <textarea id="q-text" class="form-textarea" rows="3" placeholder="Введите текст вопроса..."></textarea>
+          </div>
+          <div class="form-group">
+            <div class="options-header">
+              <label>Варианты ответов (отметьте все правильные)</label>
+              <button type="button" class="btn-sm" onclick="addOptionField()">+ Вариант</button>
+            </div>
+            <div id="options-fields" class="options-fields"></div>
+            <p class="form-hint">Поставьте галочки у всех правильных ответов.</p>
+          </div>
+          <div class="form-group">
+            <label for="q-explanation">Пояснение (необязательно)</label>
+            <textarea id="q-explanation" class="form-textarea" rows="2" placeholder="Почему эти ответы правильные..."></textarea>
+          </div>
+        </div>
+
+        <!-- ===== Задания по информатике ===== -->
+        <div id="form-task" class="hidden">
+          <div class="form-group">
+            <label for="task-title">Название задания</label>
+            <input type="text" id="task-title" class="form-input" placeholder="Например: Алгоритмы, работа с таблицами...">
+          </div>
+          <div class="form-group">
+            <div class="options-header">
+              <label>Задание (текст и картинки)</label>
+              <div style="display:flex;gap:8px;">
+                <button type="button" class="btn-sm" onclick="addTaskBlock('text')">+ Текст</button>
+                <button type="button" class="btn-sm" onclick="addTaskBlock('image')">+ Картинка</button>
+              </div>
+            </div>
+            <div id="task-blocks" class="blocks-list"></div>
+            <p class="form-hint">Можно добавить сколько угодно блоков текста и картинок. Картинку можно вставить из буфера (Ctrl+V).</p>
+          </div>
+
+          <div class="form-group">
+            <div class="options-header">
+              <label>Файлы к заданию</label>
+              <label class="btn-sm file-add-btn">
+                + Файл
+                <input type="file" id="task-file-input" multiple hidden onchange="onTaskFilesSelected(this)">
+              </label>
+            </div>
+            <ul id="task-files-list" class="files-list"></ul>
+            <p class="form-hint">Можно прикрепить любые файлы (до 5 МБ каждый). Они будут доступны в тренажёре перед ответом.</p>
+          </div>
+
+          <div class="form-group">
+            <label>Правильный ответ</label>
+            <div class="toggle-row">
+              <label class="radio-label"><input type="radio" name="answer-type" value="text" checked onchange="onAnswerTypeChange()"> Текстовый</label>
+              <label class="radio-label"><input type="radio" name="answer-type" value="table" onchange="onAnswerTypeChange()"> Таблица</label>
+            </div>
+            <textarea id="answer-text" class="form-textarea" rows="2" placeholder="Правильный текстовый ответ..."></textarea>
+            <div id="answer-table-wrap" class="hidden">
+              <div class="table-toolbar">
+                <button type="button" class="btn-sm" onclick="addTableRow()">+ Строка</button>
+                <button type="button" class="btn-sm" onclick="addTableCol()">+ Столбец</button>
+                <button type="button" class="btn-sm btn-danger-sm" onclick="removeTableRow()">− Строка</button>
+                <button type="button" class="btn-sm btn-danger-sm" onclick="removeTableCol()">− Столбец</button>
+              </div>
+              <div class="table-scroll">
+                <table id="answer-table" class="edit-table"><tbody></tbody></table>
+              </div>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <div class="options-header">
+              <label>Пояснение</label>
+              <div style="display:flex;gap:8px;">
+                <button type="button" class="btn-sm" onclick="addExplBlock('text')">+ Текст</button>
+                <button type="button" class="btn-sm" onclick="addExplBlock('image')">+ Картинка</button>
+              </div>
+            </div>
+            <div id="expl-blocks" class="blocks-list"></div>
+            <p class="form-hint">Можно добавить несколько текстов и картинок или оставить пустым. Ctrl+V — вставить картинку из буфера.</p>
+          </div>
+        </div>
+
+        <div class="form-actions">
+          <button class="btn btn-outline" onclick="cancelForm()">Отмена</button>
+          <button class="btn btn-primary" onclick="saveQuestion()">Сохранить</button>
+        </div>
+      </div>
+
+      <!-- Список вопросов -->
+      <div id="questions-list" class="questions-list"></div>
+    </div>
+
+    <!-- Страница квиза -->
+    <div id="quiz-page" class="page">
+      <header class="quiz-header">
+        <button class="btn-back" onclick="confirmGoBack()" title="На главную">← Назад</button>
+        <div class="quiz-progress">
+          <span id="progress-text">Вопрос 1 из 20</span>
+          <div class="progress-bar">
+            <div id="progress-fill" class="progress-fill"></div>
+          </div>
+        </div>
+        <div class="quiz-score">
+          <span id="score-display">0</span> правильных
+        </div>
+      </header>
+
+      <main class="quiz-main">
+        <div class="question-nav">
+          <label for="question-select">Вопрос:</label>
+          <select id="question-select" class="question-select" onchange="jumpToQuestion(this.value)"></select>
+        </div>
+        <div class="question-card">
+          <div class="question-meta">
+            <span id="question-type" class="question-type">Тренажёр</span>
+            <span id="question-timer" class="question-timer">00:00</span>
+          </div>
+          <div class="title-divider"></div>
+          <h2 id="question-text" class="question-text">Текст вопроса</h2>
+          <div id="task-content-view" class="task-content-view hidden"></div>
+          <div id="task-files-view" class="task-files-view hidden"></div>
+          <p id="multi-hint" class="multi-hint hidden">Выберите все правильные ответы</p>
+          <div id="options-container" class="options-container"></div>
+          <div id="task-answer-area" class="task-answer-area hidden">
+            <textarea id="user-answer-text" class="form-textarea" rows="3" placeholder="Введите ответ..."></textarea>
+            <div id="user-answer-table-wrap" class="hidden">
+              <div class="table-scroll">
+                <table id="user-answer-table" class="edit-table"><tbody></tbody></table>
+              </div>
+            </div>
+          </div>
+          <div class="result-divider hidden" id="result-divider"></div>
+          <div id="feedback" class="feedback hidden"></div>
+          <div id="answer-details" class="answer-details hidden"></div>
+          <div class="quiz-actions">
+            <button id="btn-check" class="btn btn-primary" onclick="checkAnswer()">Проверить</button>
+            <button id="btn-finish" class="btn btn-outline btn-danger-outline" onclick="confirmFinish()">Завершить</button>
+          </div>
+          <button id="btn-next" class="btn btn-next hidden" onclick="nextQuestion()">Следующий вопрос →</button>
+        </div>
+      </main>
+    </div>
+
+    <!-- Страница результатов -->
+    <div id="results-page" class="page">
+      <div class="results-card">
+        <div class="results-icon" id="results-icon">🎉</div>
+        <h2 id="results-title">Тренировка завершена!</h2>
+        <div class="results-stats">
+          <div class="stat">
+            <span class="stat-value" id="stat-correct">0</span>
+            <span class="stat-label">Правильных</span>
+          </div>
+          <div class="stat">
+            <span class="stat-value" id="stat-total">0</span>
+            <span class="stat-label">Всего</span>
+          </div>
+          <div class="stat">
+            <span class="stat-value" id="stat-percent">0%</span>
+            <span class="stat-label">Результат</span>
+          </div>
+        </div>
+        <p id="results-message" class="results-message"></p>
+        <div class="results-actions">
+          <button class="btn btn-primary" onclick="goHome()">На главную</button>
+          <button class="btn btn-secondary" onclick="retryQuiz()">Пройти ещё раз</button>
+        </div>
+      </div>
+    </div>
+  <!-- Профиль / вход админа -->
+    <button type="button" id="profile-btn" class="profile-btn" onclick="openAuthPanel()" title="Профиль">
+      <span class="profile-icon" aria-hidden="true">👤</span>
+    </button>
+
+    <div id="auth-modal" class="auth-modal hidden">
+      <div class="auth-card">
+        <button type="button" class="auth-close" onclick="closeAuthPanel()" title="Закрыть">×</button>
+        <div id="auth-login-view">
+          <h2>Вход администратора</h2>
+          <div class="form-group">
+            <label for="auth-login">Email</label>
+            <input type="email" id="auth-login" class="form-input" placeholder="Email" autocomplete="username">
+          </div>
+          <div class="form-group">
+            <label for="auth-password">Пароль</label>
+            <input type="password" id="auth-password" class="form-input" placeholder="Пароль" autocomplete="current-password">
+          </div>
+          <p id="auth-error" class="auth-error hidden"></p>
+          <button type="button" class="btn btn-primary" style="width:100%" onclick="tryAdminLogin()">Войти</button>
+        </div>
+        <div id="auth-admin-view" class="hidden">
+          <h2>Администратор</h2>
+          <button type="button" class="btn btn-outline btn-danger-outline" style="width:100%" onclick="adminLogout()">Выйти</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-database-compat.js"></script>
+  <script src="firebase-config.js"></script>
+  <script src="questions.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
