@@ -410,6 +410,11 @@ function updateCustomCounts() {
 function showPage(pageId) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.getElementById(pageId).classList.add('active');
+  const profile = document.getElementById('profile-btn');
+  if (profile) {
+    profile.classList.toggle('hidden', pageId !== 'home-page');
+  }
+  if (pageId !== 'home-page') closeAuthPanel();
 }
 
 function goHome() {
@@ -1072,16 +1077,43 @@ function finishAnswer() {
   updateQuestionSelect();
 }
 
+function appConfirm(message) {
+  return new Promise(function(resolve) {
+    const modal = document.getElementById('app-confirm-modal');
+    const msg = document.getElementById('app-confirm-message');
+    const ok = document.getElementById('app-confirm-ok');
+    const cancel = document.getElementById('app-confirm-cancel');
+    if (!modal || !msg || !ok || !cancel) {
+      resolve(window.confirm(message));
+      return;
+    }
+    msg.textContent = message;
+    modal.classList.remove('hidden');
+    function cleanup(result) {
+      modal.classList.add('hidden');
+      ok.onclick = null;
+      cancel.onclick = null;
+      modal.onclick = null;
+      resolve(result);
+    }
+    ok.onclick = function() { cleanup(true); };
+    cancel.onclick = function() { cleanup(false); };
+    modal.onclick = function(e) {
+      if (e.target === modal) cleanup(false);
+    };
+  });
+}
+
 function confirmGoBack() {
-  if (confirm('Вы уверены, что хотите вернуться назад? Прогресс текущей тренировки будет потерян.')) {
-    goHome();
-  }
+  appConfirm('Вы уверены, что хотите вернуться назад? Прогресс текущей тренировки будет потерян.').then(function(ok) {
+    if (ok) goHome();
+  });
 }
 
 function confirmFinish() {
-  if (confirm('Вы действительно хотите завершить тренировку?')) {
-    showResults();
-  }
+  appConfirm('Вы действительно хотите завершить тренировку?').then(function(ok) {
+    if (ok) showResults();
+  });
 }
 
 function nextQuestion() {
@@ -1697,15 +1729,17 @@ function updateSectorCount(sectorId, value) {
 }
 
 function deleteSector(sectorId) {
-  if (!confirm('Удалить сектор и все задания в нём?')) return;
-  const data = loadCustom();
-  data[levelKey()].sectors = (data[levelKey()].sectors || []).filter(function(s) { return s.id !== sectorId; });
-  saveCustom(data);
-  if (activeSectorId === sectorId) {
-    activeSectorId = null;
-    cancelForm();
-  }
-  renderQuestionsList();
+  appConfirm('Удалить сектор и все задания в нём?').then(function(ok) {
+    if (!ok) return;
+    const data = loadCustom();
+    data[levelKey()].sectors = (data[levelKey()].sectors || []).filter(function(s) { return s.id !== sectorId; });
+    saveCustom(data);
+    if (activeSectorId === sectorId) {
+      activeSectorId = null;
+      cancelForm();
+    }
+    renderQuestionsList();
+  });
 }
 
 function startNewTaskInSector(sectorId) {
@@ -1843,14 +1877,16 @@ function editTaskInSector(sectorId, index) {
 }
 
 function deleteTaskInSector(sectorId, index) {
-  if (!confirm('Удалить задание?')) return;
-  const data = loadCustom();
-  const sec = (data[levelKey()].sectors || []).find(function(s) { return s.id === sectorId; });
-  if (!sec) return;
-  sec.tasks.splice(index, 1);
-  saveCustom(data);
-  cancelForm();
-  renderQuestionsList();
+  appConfirm('Удалить задание?').then(function(ok) {
+    if (!ok) return;
+    const data = loadCustom();
+    const sec = (data[levelKey()].sectors || []).find(function(s) { return s.id === sectorId; });
+    if (!sec) return;
+    sec.tasks.splice(index, 1);
+    saveCustom(data);
+    cancelForm();
+    renderQuestionsList();
+  });
 }
 
 function editQuestion(index, sectorId) {
@@ -1927,26 +1963,30 @@ function editQuestion(index, sectorId) {
 }
 
 function deleteQuestion(index) {
-  if (!confirm('Удалить?')) return;
-  const data = loadCustom();
-  const lk = levelKey();
-  if (manageMode !== 'general') return;
-  data[lk].general.splice(index, 1);
-  saveCustom(data);
-  if (editingId && editingId.index === index) cancelForm();
-  renderQuestionsList();
+  appConfirm('Удалить?').then(function(ok) {
+    if (!ok) return;
+    const data = loadCustom();
+    const lk = levelKey();
+    if (manageMode !== 'general') return;
+    data[lk].general.splice(index, 1);
+    saveCustom(data);
+    if (editingId && editingId.index === index) cancelForm();
+    renderQuestionsList();
+  });
 }
 
 function clearAllInSection() {
-  if (!confirm('Удалить все в этом разделе?')) return;
-  const data = loadCustom();
-  const lk = levelKey();
-  if (manageMode === 'general') data[lk].general = [];
-  else data[lk].sectors = [];
-  saveCustom(data);
-  activeSectorId = null;
-  cancelForm();
-  renderQuestionsList();
+  appConfirm('Удалить все в этом разделе?').then(function(ok) {
+    if (!ok) return;
+    const data = loadCustom();
+    const lk = levelKey();
+    if (manageMode === 'general') data[lk].general = [];
+    else data[lk].sectors = [];
+    saveCustom(data);
+    activeSectorId = null;
+    cancelForm();
+    renderQuestionsList();
+  });
 }
 
 function escapeHtml(s) {
