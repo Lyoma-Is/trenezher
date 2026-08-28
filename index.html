@@ -15,7 +15,7 @@
     <!-- Главная страница -->
     <div id="home-page" class="page active">
       <header class="header">
-        <input type="text" id="site-title" class="main-title-input" value="Тренажёр для подготовки к аттестации учителей" onchange="saveSiteTitle(this.value)" onblur="saveSiteTitle(this.value)">
+        <textarea id="site-title" class="main-title-input" rows="1" oninput="autoResizeTitle(this); saveSiteTitle(this.value)" onchange="saveSiteTitle(this.value)" onblur="saveSiteTitle(this.value)">Тренажёр для подготовки к аттестации учителей</textarea>
         <p class="subtitle">Практическая подготовка к квалификационной аттестации педагогических работников</p>
       </header>
 

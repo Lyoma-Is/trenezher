@@ -265,12 +265,20 @@ function listenRealtime() {
   });
 }
 
+function autoResizeTitle(el) {
+  if (!el) el = document.getElementById('site-title');
+  if (!el) return;
+  el.style.height = 'auto';
+  el.style.height = Math.max(el.scrollHeight, 40) + 'px';
+}
+
 function applyHomeSettings() {
   const data = loadCustom();
   const titleEl = document.getElementById('site-title');
   if (titleEl) {
     titleEl.value = data.siteTitle || 'Тренажёр для подготовки к аттестации учителей';
     document.title = titleEl.value;
+    autoResizeTitle(titleEl);
   }
   renderExtraBlocks();
 }
@@ -282,7 +290,10 @@ function saveSiteTitle(value) {
   saveCustom(data);
   document.title = data.siteTitle;
   const titleEl = document.getElementById('site-title');
-  if (titleEl && titleEl.value !== data.siteTitle) titleEl.value = data.siteTitle;
+  if (titleEl) {
+    if (titleEl.value !== data.siteTitle) titleEl.value = data.siteTitle;
+    autoResizeTitle(titleEl);
+  }
 }
 
 function addExtraBlock(type) {
@@ -526,7 +537,7 @@ function startGeneralQuiz(level) {
     ...(custom[levelKey].general || [])
   ];
   if (!pool.length) {
-    alert('Нет вопросов для этой категории. Добавьте вопросы через «+ Добавить вопросы».');
+    alert('Вопросы не добавлены');
     return;
   }
   let selected = [];
@@ -558,16 +569,12 @@ function startInformaticsQuiz(level) {
   const sectors = sortSectors(custom[levelKey].sectors || []);
   const allTasks = sectors.reduce(function(acc, s) { return acc.concat(s.tasks || []); }, []);
 
-  if (!generalPool.length && !allTasks.length) {
-    alert('Нет вопросов и заданий для этой категории. Добавьте их через кнопки на главной.');
-    return;
-  }
   if (!generalPool.length) {
-    alert('Нет общих вопросов для этой категории. Добавьте через «+ Добавить вопросы».');
+    alert('Вопросы не добавлены');
     return;
   }
   if (!allTasks.length) {
-    alert('Нет заданий. Добавьте сектор и задания через «+ Добавить задания».');
+    alert('Задания не добавлены');
     return;
   }
 
@@ -660,7 +667,7 @@ function startInformaticsQuiz(level) {
   linkedGroups.forEach(pickLinkedGroup);
 
   if (!t.length) {
-    alert('Укажите в секторах число «В тренажёр» больше 0 и добавьте задания.');
+    alert('Задания не добавлены');
     return;
   }
 
@@ -2058,10 +2065,14 @@ function applyAdminUI() {
   if (loginView && adminView) {
     if (on) {
       loginView.classList.add('hidden');
+      loginView.style.display = 'none';
       adminView.classList.remove('hidden');
+      adminView.style.display = '';
     } else {
       loginView.classList.remove('hidden');
+      loginView.style.display = '';
       adminView.classList.add('hidden');
+      adminView.style.display = 'none';
     }
   }
   renderExtraBlocks();
@@ -2079,6 +2090,12 @@ function openAuthPanel() {
     if (login) login.value = '';
     if (pass) pass.value = '';
     if (err) { err.textContent = ''; err.classList.add('hidden'); }
+    // гость: только форма входа, кнопка «Выйти» скрыта
+    const adminView = document.getElementById('auth-admin-view');
+    if (adminView) {
+      adminView.classList.add('hidden');
+      adminView.style.display = 'none';
+    }
     setTimeout(function() { if (login) login.focus(); }, 50);
   }
 }
