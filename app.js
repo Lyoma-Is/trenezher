@@ -1631,12 +1631,14 @@ function saveQuestion() {
   if (editingId && editingId.index != null) {
     data[lk].general[editingId.index] = question;
   } else {
-    data[lk].general.push(question);
+    data[lk].general.unshift(question);
   }
   saveCustom(data);
   document.getElementById('question-form').classList.add('hidden');
   editingId = null;
   renderQuestionsList();
+  const qList = document.getElementById('questions-list');
+  if (qList) qList.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 function onTaskFilesSelected(input) {
@@ -1709,8 +1711,8 @@ function sortSectors(sectors) {
   return (sectors || []).slice().sort(function(a, b) {
     const ka = sectorSortKey(a);
     const kb = sectorSortKey(b);
-    // без номера — раньше; с номером — по возрастанию (19,20,21 ближе к концу)
-    if (ka.hasNum !== kb.hasNum) return ka.hasNum - kb.hasNum;
+    // с номером — по возрастанию (2, 4, 14, 16, 19…); без номера — внизу
+    if (ka.hasNum !== kb.hasNum) return kb.hasNum - ka.hasNum;
     if (ka.hasNum && kb.hasNum && ka.num !== kb.num) return ka.num - kb.num;
     return ka.name.localeCompare(kb.name, 'ru');
   });
