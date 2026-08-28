@@ -187,22 +187,18 @@ let cloudSynced = false;
 
 function loadCustom() {
   if (cloudCache) return JSON.parse(JSON.stringify(cloudCache));
-  // до синхронизации с Firebase не опираемся на чужой/старый localStorage как на истину
-  if (!cloudSynced) {
-    return emptyStore();
-  }
+  // Пока ждём Firebase — показываем локальный кэш (на телефонах иначе пусто)
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const data = normalizeStore(JSON.parse(raw));
-      cloudCache = data;
+      // не помечаем cloudSynced — Firebase потом перезапишет
       return JSON.parse(JSON.stringify(data));
     }
   } catch (e) {
     console.error(e);
   }
-  cloudCache = emptyStore();
-  return JSON.parse(JSON.stringify(cloudCache));
+  return emptyStore();
 }
 
 function saveCustom(data) {
@@ -631,6 +627,13 @@ function startGeneralQuiz(level) {
 }
 
 function startInformaticsQuiz(level) {
+  // если облако ещё не подтянулось — подождать
+  if (!cloudSynced && firebaseReady) {
+    pullFromRealtime().then(function() {
+      startInformaticsQuiz(level);
+    });
+    return;
+  }
   const custom = loadCustom();
   const levelKey = level === 'highest' ? 'highest' : 'first';
   const generalPool = [
@@ -1288,6 +1291,9 @@ function openManagePage(mode, level) {
   manageLevel = level === 'highest' ? 'highest' : 'first';
   editingId = null;
   activeSectorId = null;
+  pullFromRealtime().then(function() {
+    renderQuestionsList();
+  });
   const cat = manageLevel === 'highest' ? 'высшую категорию' : 'первую категорию';
   document.getElementById('manage-title').textContent =
     mode === 'general'
@@ -2126,6 +2132,9 @@ function initFirebase() {
       firebase.initializeApp(cfg);
     }
     firebaseReady = true;
+    try {
+      firebase.auth().setPersistence(firebase.auth.Auth.Persistence.LOCAL);
+    } catch (e) {}
     firebase.auth().onAuthStateChanged(function(user) {
       adminUser = null;
       if (user && user.uid === ADMIN_UID) {
@@ -2135,7 +2144,12 @@ function initFirebase() {
       }
       applyAdminUI();
     });
-    pullFromRealtime(); listenRealtime();
+    pullFromRealtime().then(function() {
+      listenRealtime();
+    });
+    // повторная подгрузка (на мобильных сеть может ответить позже)
+    setTimeout(function() { pullFromRealtime(); }, 1500);
+    setTimeout(function() { pullFromRealtime(); }, 4000);
     return true;
   } catch (e) {
     console.error('Firebase init error', e);

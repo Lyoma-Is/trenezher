@@ -1883,3 +1883,39 @@ body:not(.is-admin) .extra-item textarea {
     flex-wrap: wrap;
   }
 }
+
+
+/* sectors-list mobile fix */
+@media (max-width: 640px) {
+  #sectors-list,
+  .sectors-list {
+    display: flex !important;
+    flex-direction: column;
+    width: 100%;
+    overflow: visible;
+  }
+  #sectors-list.hidden {
+    display: none !important;
+  }
+  .sector-card {
+    width: 100%;
+    box-sizing: border-box;
+    overflow: visible;
+  }
+  .sector-tasks {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    width: 100%;
+  }
+  .sector-tasks .q-card {
+    width: 100%;
+    box-sizing: border-box;
+  }
+  #questions-list {
+    width: 100%;
+  }
+  #manage-page {
+    padding-bottom: 40px;
+  }
+}
