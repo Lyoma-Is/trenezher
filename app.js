@@ -203,7 +203,7 @@ function pushToRealtime(data) {
       })
       .catch(function(e) {
         console.error('Realtime DB save error', e);
-        alert('Не удалось сохранить в Firebase: ' + (e.message || e));
+        appAlert('Не удалось сохранить в Firebase: ' + (e.message || e));
       });
   } catch (e) {
     console.error(e);
@@ -316,7 +316,7 @@ function updateExtraBlock(index, field, value) {
   if (field === 'url') {
     value = sanitizeUrl(value);
     if (!value && String(arguments[2] || '').trim()) {
-      alert('Разрешены только ссылки http:// и https://');
+      appAlert('Разрешены только ссылки http:// и https://');
     }
   } else {
     value = sanitizeText(value, 5000);
@@ -537,7 +537,7 @@ function startGeneralQuiz(level) {
     ...(custom[levelKey].general || [])
   ];
   if (!pool.length) {
-    alert('Вопросы не добавлены');
+    appAlert('Вопросы не добавлены');
     return;
   }
   let selected = [];
@@ -570,11 +570,11 @@ function startInformaticsQuiz(level) {
   const allTasks = sectors.reduce(function(acc, s) { return acc.concat(s.tasks || []); }, []);
 
   if (!generalPool.length) {
-    alert('Вопросы не добавлены');
+    appAlert('Вопросы не добавлены');
     return;
   }
   if (!allTasks.length) {
-    alert('Задания не добавлены');
+    appAlert('Задания не добавлены');
     return;
   }
 
@@ -667,7 +667,7 @@ function startInformaticsQuiz(level) {
   linkedGroups.forEach(pickLinkedGroup);
 
   if (!t.length) {
-    alert('Задания не добавлены');
+    appAlert('Задания не добавлены');
     return;
   }
 
@@ -904,7 +904,7 @@ function checkAnswer() {
     return;
   }
   if (currentQuiz.selected.length === 0) {
-    alert('Выберите хотя бы один вариант');
+    appAlert('Выберите хотя бы один вариант');
     return;
   }
   finishAnswer();
@@ -921,12 +921,12 @@ function checkTaskAnswer() {
   if (q.answerType === 'table') {
     userTable = readEditTable('user-answer-table');
     const hasAny = userTable.some(r => r.some(c => c !== ''));
-    if (!hasAny) { alert('Заполните таблицу'); return; }
+    if (!hasAny) { appAlert('Заполните таблицу'); return; }
     isRight = tablesEqual(userTable, q.answerTable);
     st.userTable = userTable;
   } else {
     userText = document.getElementById('user-answer-text').value;
-    if (!userText.trim()) { alert('Введите ответ'); return; }
+    if (!userText.trim()) { appAlert('Введите ответ'); return; }
     isRight = normalizeStr(userText) === normalizeStr(q.answerText);
     st.userText = userText;
   }
@@ -1084,17 +1084,33 @@ function finishAnswer() {
   updateQuestionSelect();
 }
 
-function appConfirm(message) {
+function appConfirm(message, options) {
+  options = options || {};
+  const alertOnly = !!options.alertOnly;
   return new Promise(function(resolve) {
     const modal = document.getElementById('app-confirm-modal');
     const msg = document.getElementById('app-confirm-message');
     const ok = document.getElementById('app-confirm-ok');
     const cancel = document.getElementById('app-confirm-cancel');
     if (!modal || !msg || !ok || !cancel) {
-      resolve(window.confirm(message));
+      if (alertOnly) {
+        window.alert(message);
+        resolve(true);
+      } else {
+        resolve(window.confirm(message));
+      }
       return;
     }
     msg.textContent = message;
+    ok.textContent = options.okText || (alertOnly ? 'ОК' : 'Да');
+    if (alertOnly) {
+      cancel.classList.add('hidden');
+      cancel.style.display = 'none';
+    } else {
+      cancel.classList.remove('hidden');
+      cancel.style.display = '';
+      cancel.textContent = options.cancelText || 'Отмена';
+    }
     modal.classList.remove('hidden');
     function cleanup(result) {
       modal.classList.add('hidden');
@@ -1106,9 +1122,13 @@ function appConfirm(message) {
     ok.onclick = function() { cleanup(true); };
     cancel.onclick = function() { cleanup(false); };
     modal.onclick = function(e) {
-      if (e.target === modal) cleanup(false);
+      if (e.target === modal) cleanup(alertOnly ? true : false);
     };
   });
+}
+
+function appAlert(message) {
+  return appConfirm(message, { alertOnly: true });
 }
 
 function confirmGoBack() {
@@ -1238,11 +1258,11 @@ function startNewQuestion() {
       resetOptionFields();
     } catch (e) {
       console.error('resetOptionFields', e);
-      alert('Ошибка формы вопроса: ' + e.message);
+      appAlert('Ошибка формы вопроса: ' + e.message);
     }
   } else {
     if (!activeSectorId) {
-      alert('Сначала добавьте сектор, затем нажмите «+ Новое задание» в секторе.');
+      appAlert('Сначала добавьте сектор, затем нажмите «+ Новое задание» в секторе.');
       return;
     }
     document.getElementById('form-heading').textContent = 'Новое задание';
@@ -1252,7 +1272,7 @@ function startNewQuestion() {
       resetTaskForm();
     } catch (e) {
       console.error('resetTaskForm error', e);
-      alert('Ошибка формы задания: ' + e.message);
+      appAlert('Ошибка формы задания: ' + e.message);
     }
   }
   form.classList.remove('hidden');
@@ -1333,12 +1353,12 @@ function onBlockImage(input) {
   const file = input.files && input.files[0];
   if (!file) return;
   if (!file.type || file.type.indexOf('image/') !== 0) {
-    alert('Можно загружать только изображения');
+    appAlert('Можно загружать только изображения');
     input.value = '';
     return;
   }
   if (file.size > 2 * 1024 * 1024) {
-    alert('Картинка слишком большая (макс. 2 МБ)');
+    appAlert('Картинка слишком большая (макс. 2 МБ)');
     input.value = '';
     return;
   }
@@ -1346,7 +1366,7 @@ function onBlockImage(input) {
   reader.onload = () => {
     const src = sanitizeImageSrc(reader.result);
     if (!src) {
-      alert('Некорректный файл изображения');
+      appAlert('Некорректный файл изображения');
       return;
     }
     const item = input.closest('.block-item');
@@ -1360,7 +1380,7 @@ function setBlockImageFromDataUrl(item, dataUrl) {
   if (!item) return;
   const src = sanitizeImageSrc(dataUrl);
   if (!src) {
-    alert('Можно вставлять только изображения (png, jpg, gif, webp)');
+    appAlert('Можно вставлять только изображения (png, jpg, gif, webp)');
     return;
   }
   item.dataset.src = src;
@@ -1429,7 +1449,7 @@ async function handleClipboardPaste(e) {
       addTaskBlock('image', dataUrl);
     }
   } catch (err) {
-    alert(err.message || 'Не удалось вставить картинку');
+    appAlert(err.message || 'Не удалось вставить картинку');
   }
 }
 
@@ -1521,7 +1541,7 @@ function addTableCol() {
 
 function removeTableRow() {
   const data = readEditTable('answer-table');
-  if (data.length <= 1) { alert('Нужна хотя бы 1 строка'); return; }
+  if (data.length <= 1) { appAlert('Нужна хотя бы 1 строка'); return; }
   data.pop();
   tableRows = data.length;
   tableCols = data[0].length;
@@ -1530,7 +1550,7 @@ function removeTableRow() {
 
 function removeTableCol() {
   const data = readEditTable('answer-table');
-  if (!data[0] || data[0].length <= 1) { alert('Нужен хотя бы 1 столбец'); return; }
+  if (!data[0] || data[0].length <= 1) { appAlert('Нужен хотя бы 1 столбец'); return; }
   data.forEach(row => row.pop());
   tableRows = data.length;
   tableCols = data[0].length;
@@ -1577,7 +1597,7 @@ function removeOptionField(btn) {
   const container = document.getElementById('options-fields');
   if (!container) return;
   if (container.children.length <= 2) {
-    alert('Нужно минимум 2 варианта ответа');
+    appAlert('Нужно минимум 2 варианта ответа');
     return;
   }
   const row = btn.closest('.option-field');
@@ -1590,7 +1610,7 @@ function saveQuestion() {
     return;
   }
   const text = document.getElementById('q-text').value.trim();
-  if (!text) { alert('Введите текст вопроса'); return; }
+  if (!text) { appAlert('Введите текст вопроса'); return; }
 
   const fields = [...document.querySelectorAll('#options-fields .option-field')];
   const options = [];
@@ -1601,8 +1621,8 @@ function saveQuestion() {
     if (row.querySelector('.opt-correct').checked) correct.push(options.length);
     options.push(val);
   });
-  if (options.length < 2) { alert('Добавьте минимум 2 варианта ответа'); return; }
-  if (correct.length === 0) { alert('Отметьте хотя бы один правильный ответ'); return; }
+  if (options.length < 2) { appAlert('Добавьте минимум 2 варианта ответа'); return; }
+  if (correct.length === 0) { appAlert('Отметьте хотя бы один правильный ответ'); return; }
 
   const explanation = document.getElementById('q-explanation').value.trim();
   const question = { kind: 'choice', text, options, correct, explanation };
@@ -1624,7 +1644,7 @@ function onTaskFilesSelected(input) {
   input.value = '';
   files.forEach(file => {
     if (file.size > 5 * 1024 * 1024) {
-      alert('Файл «' + file.name + '» больше 5 МБ');
+      appAlert('Файл «' + file.name + '» больше 5 МБ');
       return;
     }
     const reader = new FileReader();
@@ -1758,7 +1778,7 @@ function saveTask() {
   const answerType = document.querySelector('input[name="answer-type"]:checked').value;
   const content = readBlocks('task-blocks');
   if (!content.length) {
-    alert('Добавьте хотя бы один текст или картинку в задание');
+    appAlert('Добавьте хотя бы один текст или картинку в задание');
     return;
   }
 
@@ -1766,18 +1786,18 @@ function saveTask() {
   let answerTable = null;
   if (answerType === 'text') {
     answerText = document.getElementById('answer-text').value.trim();
-    if (!answerText) { alert('Введите правильный текстовый ответ'); return; }
+    if (!answerText) { appAlert('Введите правильный текстовый ответ'); return; }
   } else {
     answerTable = readEditTable('answer-table');
     const hasAny = answerTable.some(r => r.some(c => c !== ''));
-    if (!hasAny) { alert('Заполните хотя бы одну ячейку таблицы'); return; }
+    if (!hasAny) { appAlert('Заполните хотя бы одну ячейку таблицы'); return; }
   }
 
   const explanationBlocks = readBlocks('expl-blocks');
   const titleEl = document.getElementById('task-title');
   const title = (titleEl && titleEl.value.trim()) || '';
   if (!title) {
-    alert('Введите название задания');
+    appAlert('Введите название задания');
     return;
   }
   const task = {
@@ -1800,7 +1820,7 @@ function saveTask() {
   } else {
     const sec = (data[lk].sectors || []).find(function(s) { return s.id === activeSectorId; });
     if (!sec) {
-      alert('Сектор не найден');
+      appAlert('Сектор не найден');
       return;
     }
     sec.tasks.push(task);
@@ -2170,7 +2190,7 @@ function adminLogout() {
 
 function requireAdmin() {
   if (isAdmin()) return true;
-  alert('Редактирование доступно только администратору. Войдите через иконку профиля.');
+  appAlert('Редактирование доступно только администратору. Войдите через иконку профиля.');
   openAuthPanel();
   return false;
 }
