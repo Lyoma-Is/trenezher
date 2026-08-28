@@ -103,28 +103,65 @@ let cloudLoading = false;
 let cloudSaveTimer = null;
 const RTDB_PATH = 'content/main';
 
+function toArray(val) {
+  if (!val) return [];
+  if (Array.isArray(val)) return val.filter(function(x) { return x != null; });
+  if (typeof val === 'object') {
+    return Object.keys(val)
+      .filter(function(k) { return k !== 'length' && val[k] != null; })
+      .sort(function(a, b) {
+        const na = parseInt(a, 10);
+        const nb = parseInt(b, 10);
+        if (!isNaN(na) && !isNaN(nb)) return na - nb;
+        return String(a).localeCompare(String(b));
+      })
+      .map(function(k) { return val[k]; });
+  }
+  return [];
+}
+
+function normalizeTaskItem(t) {
+  if (!t || typeof t !== 'object') return t;
+  const task = Object.assign({}, t);
+  if (task.content) task.content = toArray(task.content);
+  if (task.files) task.files = toArray(task.files);
+  if (task.explanationBlocks) task.explanationBlocks = toArray(task.explanationBlocks);
+  if (task.answerTable) {
+    task.answerTable = toArray(task.answerTable).map(function(row) {
+      return toArray(row);
+    });
+  }
+  if (task.options) task.options = toArray(task.options);
+  if (task.correct != null && !Array.isArray(task.correct)) {
+    if (typeof task.correct === 'object') task.correct = toArray(task.correct);
+  }
+  return task;
+}
+
 function normalizeStore(data) {
   const store = emptyStore();
   if (!data || typeof data !== 'object') return store;
   function fixSide(side) {
     side = side || {};
-    let sectors = side.sectors || [];
-    if (!sectors.length && side.tasks && side.tasks.length) {
+    let sectors = toArray(side.sectors);
+    const legacyTasks = toArray(side.tasks);
+    if (!sectors.length && legacyTasks.length) {
       sectors = [{
         id: newSectorId(),
         name: 'Основной сектор',
-        count: Math.min(30, side.tasks.length),
-        tasks: side.tasks.filter(function(t) { return t.kind === 'task'; })
+        count: Math.min(30, legacyTasks.length),
+        tasks: legacyTasks.filter(function(t) { return t && t.kind === 'task'; })
       }];
     }
     return {
-      general: (side.general || []).map(normalizeQuestion),
-      sectors: (sectors || []).map(function(s) {
+      general: toArray(side.general).map(normalizeQuestion),
+      sectors: sectors.map(function(s) {
+        s = s || {};
         return {
           id: s.id || newSectorId(),
           name: s.name || 'Сектор',
           count: Math.max(0, parseInt(s.count, 10) || 0),
-          tasks: s.tasks || []
+          tasks: toArray(s.tasks).map(normalizeTaskItem)
         };
       })
     };
@@ -132,24 +169,28 @@ function normalizeStore(data) {
   store.first = fixSide(data.first);
   store.highest = fixSide(data.highest);
   if (data.siteTitle) store.siteTitle = sanitizeText(data.siteTitle, 200);
-  if (Array.isArray(data.extraBlocks)) {
-    store.extraBlocks = data.extraBlocks.map(function(b) {
-      if (!b || typeof b !== 'object') return null;
-      if (b.type === 'link') {
-        return {
-          type: 'link',
-          text: sanitizeText(b.text, 500),
-          url: sanitizeUrl(b.url)
-        };
-      }
-      return { type: 'text', value: sanitizeText(b.value, 5000) };
-    }).filter(Boolean);
-  }
+  store.extraBlocks = toArray(data.extraBlocks).map(function(b) {
+    if (!b || typeof b !== 'object') return null;
+    if (b.type === 'link') {
+      return {
+        type: 'link',
+        text: sanitizeText(b.text, 500),
+        url: sanitizeUrl(b.url)
+      };
+    }
+    return { type: 'text', value: sanitizeText(b.value, 5000) };
+  }).filter(Boolean);
   return store;
 }
 
+let cloudSynced = false;
+
 function loadCustom() {
   if (cloudCache) return JSON.parse(JSON.stringify(cloudCache));
+  // до синхронизации с Firebase не опираемся на чужой/старый localStorage как на истину
+  if (!cloudSynced) {
+    return emptyStore();
+  }
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
@@ -167,6 +208,7 @@ function loadCustom() {
 function saveCustom(data) {
   const normalized = normalizeStore(data);
   cloudCache = normalized;
+  cloudSynced = true;
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
   } catch (e) {
@@ -210,8 +252,49 @@ function pushToRealtime(data) {
   }
 }
 
+function applyCloudData(val, fromListen) {
+  // не сбрасывать форму редактирования живым listener'ом
+  const form = document.getElementById('question-form');
+  if (fromListen && form && !form.classList.contains('hidden') && isAdmin()) {
+    cloudCache = normalizeStore(val || emptyStore());
+    cloudSynced = true;
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(cloudCache));
+    } catch (e) {}
+    return;
+  }
+  const data = normalizeStore(val || emptyStore());
+  cloudCache = data;
+  cloudSynced = true;
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  } catch (e) {}
+  updateCustomCounts();
+  applyHomeSettings();
+  const manage = document.getElementById('manage-page');
+  if (manage && manage.classList.contains('active')) {
+    renderQuestionsList();
+  }
+}
+
 function pullFromRealtime() {
   if (!firebaseReady || !window.firebase || !firebase.database) {
+    // offline / no firebase — fallback to local once
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        cloudCache = normalizeStore(JSON.parse(raw));
+        cloudSynced = true;
+        updateCustomCounts();
+        applyHomeSettings();
+      } else {
+        cloudSynced = true;
+        cloudCache = emptyStore();
+      }
+    } catch (e) {
+      cloudSynced = true;
+      cloudCache = emptyStore();
+    }
     return Promise.resolve(false);
   }
   cloudLoading = true;
@@ -219,29 +302,29 @@ function pullFromRealtime() {
     .then(function(snap) {
       cloudLoading = false;
       const val = snap.val();
-      if (val) {
-        const data = normalizeStore(val);
-        cloudCache = data;
-        try {
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-        } catch (e) {}
-        updateCustomCounts();
-        applyHomeSettings();
-        const manage = document.getElementById('manage-page');
-        if (manage && manage.classList.contains('active')) {
-          renderQuestionsList();
-        }
-        return true;
-      }
-      const local = loadCustom();
-      if (isAdmin()) {
-        pushToRealtime(local);
-      }
-      return false;
+      // Firebase — источник правды. Пустой узел = пустые данные, не заливаем localStorage.
+      applyCloudData(val);
+      return !!val;
     })
     .catch(function(e) {
       cloudLoading = false;
       console.error('Realtime DB load error', e);
+      // при ошибке сети — локальный кэш
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (raw) {
+          cloudCache = normalizeStore(JSON.parse(raw));
+          cloudSynced = true;
+          updateCustomCounts();
+          applyHomeSettings();
+        } else {
+          cloudSynced = true;
+          cloudCache = emptyStore();
+        }
+      } catch (e2) {
+        cloudSynced = true;
+        cloudCache = emptyStore();
+      }
       return false;
     });
 }
@@ -249,19 +332,7 @@ function pullFromRealtime() {
 function listenRealtime() {
   if (!firebaseReady || !window.firebase || !firebase.database) return;
   firebase.database().ref('content/main').on('value', function(snap) {
-    const val = snap.val();
-    if (!val) return;
-    const data = normalizeStore(val);
-    cloudCache = data;
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-    } catch (e) {}
-    updateCustomCounts();
-    applyHomeSettings();
-    const manage = document.getElementById('manage-page');
-    if (manage && manage.classList.contains('active')) {
-      renderQuestionsList();
-    }
+    applyCloudData(snap.val(), true);
   });
 }
 
