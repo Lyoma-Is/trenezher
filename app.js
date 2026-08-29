@@ -254,12 +254,10 @@ function setSyncStatus(state, title) {
 
 
 function readLocalStore() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) return normalizeStore(JSON.parse(raw));
-  } catch (e) {}
+  // локальное хранение отключено — только память / Firestore
   return emptyStore();
 }
+
 
 function countContent(data) {
   data = data || emptyStore();
@@ -275,18 +273,16 @@ function countContent(data) {
 }
 
 function cacheLocally(data) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-  } catch (e) {
-    console.warn('localStorage', e);
-  }
+  // localStorage отключён по требованию — данные только в Firestore и в памяти сессии
 }
+
 
 /** Всегда из памяти после синка; до синка — из local только как временный кэш */
 function loadCustom() {
   if (cloudCache) return JSON.parse(JSON.stringify(cloudCache));
-  return JSON.parse(JSON.stringify(readLocalStore()));
+  return emptyStore();
 }
+
 
 /**
  * Сохранение: сначала в Firebase (источник правды), потом локальный кэш.
@@ -401,7 +397,8 @@ function applyCloudData(val, fromListen) {
 
 function pullFromCloud() {
   if (!firebaseReady || !window.firebase || !firebase.firestore) {
-    if (!cloudCache) cloudCache = readLocalStore();
+    try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
+    if (!cloudCache) cloudCache = emptyStore();
     cloudSynced = true;
     updateCustomCounts();
     applyHomeSettings();
@@ -434,7 +431,8 @@ function pullFromCloud() {
     .catch(function(e) {
       cloudLoading = false;
       console.error('Firestore load error', e);
-      if (!cloudCache) cloudCache = readLocalStore();
+      try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
+    if (!cloudCache) cloudCache = emptyStore();
       cloudSynced = true;
       setSyncStatus('err', 'Ошибка загрузки');
       updateCustomCounts();
@@ -446,7 +444,8 @@ function pullFromCloud() {
     setTimeout(function() {
       if (cloudLoading) {
         cloudLoading = false;
-        if (!cloudCache) cloudCache = readLocalStore();
+        try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
+    if (!cloudCache) cloudCache = emptyStore();
         setSyncStatus(countContent(cloudCache) ? 'ok' : 'err', 'Таймаут, показан кэш');
         resolve(false);
       }
@@ -467,7 +466,8 @@ function migrateFromRtdbIfNeeded() {
 
 /** Загрузка из облака — для всех устройств (ПК и телефон) */
 function ensureDataLoaded(force) {
-  if (!cloudCache) cloudCache = readLocalStore();
+  try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
+    if (!cloudCache) cloudCache = emptyStore();
 
   if (!firebaseReady || !window.firebase || !firebase.firestore) {
     cloudSynced = true;
@@ -489,7 +489,8 @@ function ensureDataLoaded(force) {
     cloudSynced = true;
     return JSON.parse(JSON.stringify(cloudCache));
   }).catch(function() {
-    if (!cloudCache) cloudCache = readLocalStore();
+    try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
+    if (!cloudCache) cloudCache = emptyStore();
     cloudSynced = true;
     return JSON.parse(JSON.stringify(cloudCache));
   });
@@ -519,26 +520,10 @@ function mergeStores(a, b) {
 
 /** Один раз: залить с ПК более полные данные в облако после входа админа */
 function syncLocalToCloudIfNeeded(snapshotBeforePull) {
-  if (!isAdmin()) return Promise.resolve(false);
-  const local = snapshotBeforePull || readLocalStore();
-  const cloud = cloudCache || emptyStore();
-  const merged = mergeStores(local, cloud);
-  const mergedN = countContent(merged);
-  const cloudN = countContent(cloud);
-  console.log('Sync merge: local', countContent(local), 'cloud', cloudN, 'merged', mergedN);
-  if (mergedN > cloudN) {
-    cloudCache = merged;
-    cloudSynced = true;
-    cacheLocally(merged);
-    setSyncStatus('syncing', 'Выгрузка полных данных…');
-    return pushToCloud(merged).then(function() {
-      updateCustomCounts();
-      applyHomeSettings();
-      return true;
-    });
-  }
+  // локальное хранение отключено — синхронизация только через Firestore
   return Promise.resolve(false);
 }
+
 
 
 function listenCloud() {
@@ -565,20 +550,20 @@ function listenCloud() {
 function listenRealtime() { listenCloud(); }
 
 function forceFullSync() {
-  setSyncStatus('syncing', 'Принудительная синхронизация…');
-  const localBefore = readLocalStore();
+  setSyncStatus('syncing', 'Загрузка из Firestore…');
+  cloudCache = null;
+  cloudSynced = false;
   return pullFromCloud().then(function() {
-    if (isAdmin()) return syncLocalToCloudIfNeeded(localBefore);
-  }).then(function() {
     updateCustomCounts();
     applyHomeSettings();
     const manage = document.getElementById('manage-page');
     if (manage && manage.classList.contains('active')) renderQuestionsList();
-    setSyncStatus('ok', 'Синхронизация завершена');
+    setSyncStatus('ok', 'Синхронизировано: ' + countContent(cloudCache || emptyStore()) + ' элементов');
   }).catch(function() {
     setSyncStatus('err', 'Сбой синхронизации');
   });
 }
+
 
 
 function listenRealtime() { listenCloud(); }
@@ -2549,10 +2534,7 @@ function initFirebase() {
             adminUser = user;
             applyAdminUI();
             // сохранить локальные данные ДО pull (иначе 52 затрутся 20 из облака)
-            const localBefore = readLocalStore();
-            ensureDataLoaded().then(function() {
-              return syncLocalToCloudIfNeeded(localBefore);
-            }).then(function() {
+            ensureDataLoaded(true).then(function() {
               updateCustomCounts();
               applyHomeSettings();
               const manage = document.getElementById('manage-page');
@@ -2569,7 +2551,8 @@ function initFirebase() {
         });
       });
 
-    if (!cloudCache) cloudCache = readLocalStore();
+    try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
+    if (!cloudCache) cloudCache = emptyStore();
     updateCustomCounts();
     applyHomeSettings();
     pullFromRealtime().then(function() {
@@ -2694,10 +2677,7 @@ function tryAdminLogin() {
       }
       adminUser = cred.user;
       applyAdminUI();
-      const localBefore = readLocalStore();
-      return ensureDataLoaded().then(function() {
-        return syncLocalToCloudIfNeeded(localBefore);
-      }).then(function() {
+      return ensureDataLoaded(true).then(function() {
         updateCustomCounts();
         applyHomeSettings();
         closeAuthPanel();
@@ -2744,7 +2724,8 @@ function requireAdmin() {
 
 
 document.addEventListener('DOMContentLoaded', () => {
-  if (!cloudCache) cloudCache = readLocalStore();
+  try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
+    if (!cloudCache) cloudCache = emptyStore();
   initFirebase();
   applyAdminUI();
   updateCustomCounts();
