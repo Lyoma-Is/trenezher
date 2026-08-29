@@ -382,19 +382,35 @@ function pullFromRealtime() {
 }
 
 function ensureDataLoaded() {
+  // всегда быстро отдаём данные — кнопки не должны «зависать»
+  function fromLocal() {
+    const local = cloudCache || readLocalStore();
+    if (!cloudCache) cloudCache = local;
+    return local;
+  }
   if (cloudSynced && cloudCache) {
-    return Promise.resolve(cloudCache);
+    return Promise.resolve(JSON.parse(JSON.stringify(cloudCache)));
   }
   if (firebaseReady && window.firebase && firebase.database) {
     try { firebase.database().goOnline(); } catch (e) {}
-    return pullFromRealtime().then(function() {
-      return cloudCache || loadCustom();
+    const timeout = new Promise(function(resolve) {
+      setTimeout(function() {
+        resolve(fromLocal());
+      }, 2500);
+    });
+    const pull = pullFromRealtime().then(function() {
+      return cloudCache || fromLocal();
+    }).catch(function() {
+      return fromLocal();
+    });
+    return Promise.race([pull, timeout]).then(function(data) {
+      cloudSynced = true;
+      if (data && !cloudCache) cloudCache = normalizeStore(data);
+      return cloudCache || fromLocal();
     });
   }
-  const local = readLocalStore();
-  cloudCache = local;
   cloudSynced = true;
-  return Promise.resolve(local);
+  return Promise.resolve(fromLocal());
 }
 
 function listenRealtime() {
@@ -670,12 +686,18 @@ function startGeneralQuiz(level) {
     if (count > maxAllowed) count = maxAllowed;
     document.getElementById(inputId).value = count;
 
-    const custom = loadCustom();
-    const levelKey = level === 'highest' ? 'highest' : 'first';
-    const pool = [
-      ...GENERAL_QUESTIONS.map(normalizeQuestion),
-      ...(custom[levelKey].general || [])
-    ];
+    let custom = loadCustom();
+    let levelKey = level === 'highest' ? 'highest' : 'first';
+    let pool = (GENERAL_QUESTIONS || []).map(normalizeQuestion).concat(custom[levelKey].general || []);
+    // запасной вариант — локальный кэш (если облако ещё пустое)
+    if (!pool.length) {
+      const local = readLocalStore();
+      if (countContent(local) > countContent(custom)) {
+        custom = local;
+        cloudCache = local;
+        pool = (GENERAL_QUESTIONS || []).map(normalizeQuestion).concat(custom[levelKey].general || []);
+      }
+    }
     if (!pool.length) {
       appAlert('Вопросы не добавлены');
       return;
@@ -697,25 +719,37 @@ function startGeneralQuiz(level) {
     showPage('quiz-page');
     startQuizTimer();
     renderQuestion();
+  }).catch(function(e) {
+    console.error(e);
+    appAlert('Не удалось загрузить вопросы. Проверьте интернет и обновите страницу.');
   });
 }
 
 function startInformaticsQuiz(level) {
   ensureDataLoaded().then(function() {
     _startInformaticsQuizBody(level);
+  }).catch(function(e) {
+    console.error(e);
+    appAlert('Не удалось загрузить задания. Проверьте интернет и обновите страницу.');
   });
 }
 
 function _startInformaticsQuizBody(level) {
-  const custom = loadCustom();
+  let custom = loadCustom();
   const levelKey = level === 'highest' ? 'highest' : 'first';
-  const generalPool = [
-    ...GENERAL_QUESTIONS.map(normalizeQuestion),
-    ...(custom[levelKey].general || [])
-  ];
-  const sectors = sortSectors(custom[levelKey].sectors || []);
-  const allTasks = sectors.reduce(function(acc, s) { return acc.concat(s.tasks || []); }, []);
-
+  let generalPool = (GENERAL_QUESTIONS || []).map(normalizeQuestion).concat(custom[levelKey].general || []);
+  let sectors = sortSectors(custom[levelKey].sectors || []);
+  let allTasks = sectors.reduce(function(acc, s) { return acc.concat(s.tasks || []); }, []);
+  if (!generalPool.length || !allTasks.length) {
+    const local = readLocalStore();
+    if (countContent(local) > countContent(custom)) {
+      custom = local;
+      cloudCache = local;
+      generalPool = (GENERAL_QUESTIONS || []).map(normalizeQuestion).concat(custom[levelKey].general || []);
+      sectors = sortSectors(custom[levelKey].sectors || []);
+      allTasks = sectors.reduce(function(acc, s) { return acc.concat(s.tasks || []); }, []);
+    }
+  }
   if (!generalPool.length) {
     appAlert('Вопросы не добавлены');
     return;
