@@ -283,17 +283,13 @@ function saveCustom(data) {
 function scheduleCloudSave(data) {
   if (!firebaseReady || !window.firebase || !firebase.database) return;
   const user = firebase.auth().currentUser;
-  if (!user || user.uid !== ADMIN_UID) {
-    console.warn('Сохранение только локально: нет сессии админа Firebase');
-    return;
-  }
+  if (!user || user.uid !== ADMIN_UID) return;
   if (cloudSaveTimer) clearTimeout(cloudSaveTimer);
-  // сразу + повтор через 300мс на случай гонки
-  pushToRealtime(data);
   cloudSaveTimer = setTimeout(function() {
     pushToRealtime(data);
-  }, 300);
+  }, 150);
 }
+
 
 function pushToRealtime(data) {
   return new Promise(function(resolve, reject) {
@@ -367,25 +363,34 @@ function applyCloudData(val, fromListen) {
 
 function pullFromRealtime() {
   if (!firebaseReady || !window.firebase || !firebase.database) {
-    cloudCache = readLocalStore();
+    if (!cloudCache) cloudCache = readLocalStore();
     cloudSynced = true;
     updateCustomCounts();
     applyHomeSettings();
     return Promise.resolve(countContent(cloudCache) > 0);
   }
+  if (cloudLoading) {
+    return Promise.resolve(!!(cloudCache && countContent(cloudCache)));
+  }
   cloudLoading = true;
   try { firebase.database().goOnline(); } catch (e) {}
-  return firebase.database().ref('content/main').once('value')
+
+  const loadPromise = firebase.database().ref('content/main').once('value')
     .then(function(snap) {
       cloudLoading = false;
       const val = snap.val();
       if (val) {
-        applyCloudData(val, false);
-        console.log('Firebase: загружено', countContent(cloudCache));
+        const data = normalizeStore(val);
+        cloudCache = data;
+        cloudSynced = true;
+        cacheLocally(data);
+        updateCustomCounts();
+        applyHomeSettings();
         return true;
       }
-      cloudCache = cloudCache || emptyStore();
+      cloudCache = emptyStore();
       cloudSynced = true;
+      cacheLocally(cloudCache);
       updateCustomCounts();
       applyHomeSettings();
       return false;
@@ -394,44 +399,57 @@ function pullFromRealtime() {
       cloudLoading = false;
       console.error('Firebase load error', e);
       if (!cloudCache) cloudCache = readLocalStore();
-      cloudSynced = countContent(cloudCache) > 0;
+      cloudSynced = true;
       updateCustomCounts();
       applyHomeSettings();
       return false;
     });
+
+  const timeout = new Promise(function(resolve) {
+    setTimeout(function() {
+      if (cloudLoading) {
+        cloudLoading = false;
+        if (!cloudCache) cloudCache = readLocalStore();
+        resolve(false);
+      }
+    }, 4000);
+  });
+  return Promise.race([loadPromise, timeout]);
 }
 
+
 /** Загрузка из облака — для всех устройств (ПК и телефон) */
-function ensureDataLoaded() {
-  if (cloudCache && cloudSynced && countContent(cloudCache) > 0) {
-    return Promise.resolve(JSON.parse(JSON.stringify(cloudCache)));
-  }
+function ensureDataLoaded(force) {
+  if (!cloudCache) cloudCache = readLocalStore();
+
   if (!firebaseReady || !window.firebase || !firebase.database) {
-    cloudCache = readLocalStore();
     cloudSynced = true;
     return Promise.resolve(JSON.parse(JSON.stringify(cloudCache)));
   }
-  try { firebase.database().goOnline(); } catch (e) {}
 
-  function attempt(left) {
-    return pullFromRealtime().then(function() {
-      if (cloudCache && (cloudSynced || countContent(cloudCache) > 0)) {
-        return JSON.parse(JSON.stringify(cloudCache));
-      }
-      if (left <= 1) {
-        cloudSynced = true;
-        cloudCache = cloudCache || emptyStore();
-        return JSON.parse(JSON.stringify(cloudCache));
-      }
-      return new Promise(function(resolve) {
-        setTimeout(function() {
-          resolve(attempt(left - 1));
-        }, 1000);
+  // быстро: отдать кэш, облако догрузить в фоне
+  if (!force) {
+    if (!cloudSynced) {
+      pullFromRealtime().then(function() {
+        updateCustomCounts();
+        applyHomeSettings();
       });
-    });
+    }
+    return Promise.resolve(JSON.parse(JSON.stringify(cloudCache)));
   }
-  return attempt(6);
+
+  try { firebase.database().goOnline(); } catch (e) {}
+  return pullFromRealtime().then(function() {
+    if (!cloudCache) cloudCache = emptyStore();
+    cloudSynced = true;
+    return JSON.parse(JSON.stringify(cloudCache));
+  }).catch(function() {
+    if (!cloudCache) cloudCache = readLocalStore();
+    cloudSynced = true;
+    return JSON.parse(JSON.stringify(cloudCache));
+  });
 }
+
 
 function mergeStores(a, b) {
   a = normalizeStore(a || emptyStore());
@@ -1511,7 +1529,7 @@ function openManagePage(mode, level) {
     }
   }
   showPage('manage-page');
-  // всегда свежие данные из облака — одинаково на ПК и телефоне
+  renderQuestionsList();
   ensureDataLoaded(true).then(function() {
     renderQuestionsList();
     updateCustomCounts();
@@ -2431,17 +2449,14 @@ function initFirebase() {
         });
       });
 
-    ensureDataLoaded().then(function() {
+    if (!cloudCache) cloudCache = readLocalStore();
+    updateCustomCounts();
+    applyHomeSettings();
+    pullFromRealtime().then(function() {
       listenRealtime();
       updateCustomCounts();
       applyHomeSettings();
     });
-    setTimeout(function() {
-      ensureDataLoaded().then(function() { updateCustomCounts(); applyHomeSettings(); });
-    }, 2000);
-    setTimeout(function() {
-      ensureDataLoaded().then(function() { updateCustomCounts(); applyHomeSettings(); });
-    }, 5000);
     return true;
   } catch (e) {
     console.error('Firebase init error', e);
@@ -2609,12 +2624,11 @@ function requireAdmin() {
 
 
 document.addEventListener('DOMContentLoaded', () => {
+  if (!cloudCache) cloudCache = readLocalStore();
   initFirebase();
   applyAdminUI();
-  ensureDataLoaded(true).then(function() {
-    updateCustomCounts();
-    applyHomeSettings();
-  });
+  updateCustomCounts();
+  applyHomeSettings();
   if (!restoreQuizProgress()) {
     showPage('home-page');
   }
