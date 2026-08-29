@@ -397,34 +397,81 @@ function pullFromCloud() {
     cloudSynced = true;
     updateCustomCounts();
     applyHomeSettings();
-    return Promise.resolve(countContent(cloudCache) > 0);
+    return Promise.resolve(false);
   }
   if (cloudLoading) {
     return Promise.resolve(!!(cloudCache && countContent(cloudCache)));
   }
   cloudLoading = true;
-  setSyncStatus('syncing', 'Загрузка из облака…');
+  setSyncStatus('syncing', 'Загрузка…');
   try { firebase.database().goOnline(); } catch (e) {}
 
-  const loadPromise = firebase.database().ref(RTDB_PATH).once('value')
-    .then(function(snap) {
+  // параллельно: first, highest, meta (title/blocks) — быстрее чем один огромный snapshot
+  const db = firebase.database();
+  const base = RTDB_PATH;
+  const pFirst = db.ref(base + '/first').once('value');
+  const pHighest = db.ref(base + '/highest').once('value');
+  const pTitle = db.ref(base + '/siteTitle').once('value');
+  const pBlocks = db.ref(base + '/extraBlocks').once('value');
+  const pUpdated = db.ref(base + '/updatedAt').once('value');
+
+  const loadPromise = Promise.all([pFirst, pHighest, pTitle, pBlocks, pUpdated])
+    .then(function(results) {
       cloudLoading = false;
-      const val = snap.val();
-      if (val) {
-        if (val.updatedAt) lastCloudUpdatedAt = val.updatedAt;
-        applyCloudData(val, false);
-        const n = countContent(cloudCache);
-        setSyncStatus('ok', 'Загружено: ' + n + ' элементов');
-        console.log('RTDB loaded', n,
-          'first.general=', (cloudCache.first && cloudCache.first.general || []).length);
-        return true;
+      const firstVal = results[0].val();
+      const highestVal = results[1].val();
+      const titleVal = results[2].val();
+      const blocksVal = results[3].val();
+      const updatedVal = results[4].val();
+
+      const store = emptyStore();
+      if (firstVal) {
+        store.first = {
+          general: toArray(firstVal.general).map(normalizeQuestion),
+          sectors: toArray(firstVal.sectors).map(function(s) {
+            s = s || {};
+            return {
+              id: s.id || newSectorId(),
+              name: s.name || 'Сектор',
+              count: Math.max(0, parseInt(s.count, 10) || 0),
+              tasks: toArray(s.tasks).map(normalizeTaskItem)
+            };
+          })
+        };
       }
-      cloudCache = emptyStore();
+      if (highestVal) {
+        store.highest = {
+          general: toArray(highestVal.general).map(normalizeQuestion),
+          sectors: toArray(highestVal.sectors).map(function(s) {
+            s = s || {};
+            return {
+              id: s.id || newSectorId(),
+              name: s.name || 'Сектор',
+              count: Math.max(0, parseInt(s.count, 10) || 0),
+              tasks: toArray(s.tasks).map(normalizeTaskItem)
+            };
+          })
+        };
+      }
+      if (titleVal) store.siteTitle = sanitizeText(String(titleVal), 200);
+      if (blocksVal) {
+        store.extraBlocks = toArray(blocksVal).map(function(b) {
+          if (!b || typeof b !== 'object') return null;
+          if (b.type === 'link') {
+            return { type: 'link', text: sanitizeText(b.text, 500), url: sanitizeUrl(b.url) };
+          }
+          return { type: 'text', value: sanitizeText(b.value, 5000) };
+        }).filter(Boolean);
+      }
+      if (updatedVal) lastCloudUpdatedAt = updatedVal;
+
+      cloudCache = store;
       cloudSynced = true;
-      setSyncStatus('ok', 'Облако пусто');
       updateCustomCounts();
       applyHomeSettings();
-      return false;
+      setSyncStatus('ok', 'Загружено: ' + countContent(store) + ' элементов');
+      console.log('RTDB parallel load OK', countContent(store));
+      return true;
     })
     .catch(function(e) {
       cloudLoading = false;
@@ -441,14 +488,16 @@ function pullFromCloud() {
     setTimeout(function() {
       if (cloudLoading) {
         cloudLoading = false;
-        if (!cloudCache) cloudCache = emptyStore();
-        setSyncStatus(countContent(cloudCache) ? 'ok' : 'err', 'Таймаут загрузки');
+        setSyncStatus(countContent(cloudCache) ? 'ok' : 'err', 'Таймаут');
         resolve(false);
       }
-    }, 6000);
+    }, 8000);
   });
   return Promise.race([loadPromise, timeout]);
 }
+function pullFromRealtime() { return pullFromCloud(); }
+function migrateFromRtdbIfNeeded() { return Promise.resolve(false); }
+
 function pullFromRealtime() { return pullFromCloud(); }
 function migrateFromRtdbIfNeeded() { return Promise.resolve(false); }
 
@@ -464,6 +513,60 @@ function migrateFromRtdbIfNeeded() {
 
 
 /** Загрузка из облака — для всех устройств (ПК и телефон) */
+
+/** Быстрая загрузка одной категории (first|highest) без всего документа */
+function pullCategory(levelKey) {
+  levelKey = levelKey === 'highest' ? 'highest' : 'first';
+  if (!firebaseReady || !window.firebase || !firebase.database) {
+    return Promise.resolve(null);
+  }
+  setSyncStatus('syncing', 'Загрузка…');
+  return firebase.database().ref(RTDB_PATH + '/' + levelKey).once('value')
+    .then(function(snap) {
+      const val = snap.val();
+      if (!cloudCache) cloudCache = emptyStore();
+      if (val) {
+        const side = {
+          general: toArray(val.general).map(normalizeQuestion),
+          sectors: toArray(val.sectors).map(function(s) {
+            s = s || {};
+            return {
+              id: s.id || newSectorId(),
+              name: s.name || 'Сектор',
+              count: Math.max(0, parseInt(s.count, 10) || 0),
+              tasks: toArray(s.tasks).map(normalizeTaskItem)
+            };
+          })
+        };
+        cloudCache[levelKey] = side;
+        cloudSynced = true;
+        updateCustomCounts();
+        setSyncStatus('ok', 'Загружено');
+        return side;
+      }
+      cloudCache[levelKey] = { general: [], sectors: [] };
+      cloudSynced = true;
+      updateCustomCounts();
+      setSyncStatus('ok', 'Пусто');
+      return cloudCache[levelKey];
+    })
+    .catch(function(e) {
+      console.error(e);
+      setSyncStatus('err', 'Ошибка загрузки');
+      return null;
+    });
+}
+
+function ensureCategoryLoaded(level) {
+  const lk = level === 'highest' ? 'highest' : 'first';
+  if (cloudCache && cloudCache[lk] &&
+      ((cloudCache[lk].general && cloudCache[lk].general.length) ||
+       (cloudCache[lk].sectors && cloudCache[lk].sectors.length))) {
+    return Promise.resolve(cloudCache[lk]);
+  }
+  return pullCategory(lk);
+}
+
 function ensureDataLoaded(force) {
   if (!cloudCache) cloudCache = emptyStore();
 
@@ -472,7 +575,13 @@ function ensureDataLoaded(force) {
     return Promise.resolve(JSON.parse(JSON.stringify(cloudCache)));
   }
 
+  // Уже в памяти сессии — сразу
+  if (!force && cloudSynced && countContent(cloudCache) > 0) {
+    return Promise.resolve(JSON.parse(JSON.stringify(cloudCache)));
+  }
+
   if (!force) {
+    // не блокируем: фон
     if (!cloudSynced) {
       pullFromCloud().then(function() {
         updateCustomCounts();
@@ -482,17 +591,15 @@ function ensureDataLoaded(force) {
     return Promise.resolve(JSON.parse(JSON.stringify(cloudCache)));
   }
 
-  try { firebase.database().goOnline(); } catch (e) {}
   return pullFromCloud().then(function() {
     if (!cloudCache) cloudCache = emptyStore();
-    cloudSynced = true;
     return JSON.parse(JSON.stringify(cloudCache));
   }).catch(function() {
     if (!cloudCache) cloudCache = emptyStore();
-    cloudSynced = true;
     return JSON.parse(JSON.stringify(cloudCache));
   });
 }
+
 
 
 
@@ -675,7 +782,7 @@ function renderExtraBlocks() {
   const data = loadCustom();
   const blocks = data.extraBlocks || [];
   if (!blocks.length) {
-    box.innerHTML = '<p class="form-hint" style="margin:0">Можно добавить текст или ссылку под карточками категорий.</p>';
+    box.innerHTML = isAdmin() ? '<p class="form-hint" style="margin:0">Можно добавить текст или ссылку под карточками категорий.</p>' : '';
     return;
   }
   const n = blocks.length;
@@ -843,7 +950,8 @@ function tablesEqual(a, b) {
 }
 
 function startGeneralQuiz(level) {
-  ensureDataLoaded().then(function() {
+  const levelKey = level === 'highest' ? 'highest' : 'first';
+  ensureCategoryLoaded(level).then(function() {
     const inputId = level === 'first' ? 'count-first' : 'count-highest';
     const maxAllowed = level === 'first' ? 300 : 600;
     let count = parseInt(document.getElementById(inputId).value, 10);
@@ -852,7 +960,6 @@ function startGeneralQuiz(level) {
     document.getElementById(inputId).value = count;
 
     let custom = loadCustom();
-    let levelKey = level === 'highest' ? 'highest' : 'first';
     let pool = (GENERAL_QUESTIONS || []).map(normalizeQuestion).concat(custom[levelKey].general || []);
     // запасной вариант — локальный кэш (если облако ещё пустое)
     if (!pool.length) {
@@ -892,7 +999,7 @@ function startGeneralQuiz(level) {
 }
 
 function startInformaticsQuiz(level) {
-  ensureDataLoaded().then(function() {
+  ensureCategoryLoaded(level).then(function() {
     _startInformaticsQuizBody(level);
   }).catch(function(e) {
     console.error(e);
@@ -1612,7 +1719,7 @@ function openManagePage(mode, level) {
   }
   showPage('manage-page');
   renderQuestionsList();
-  ensureDataLoaded(true).then(function() {
+  pullCategory(manageLevel).then(function() {
     renderQuestionsList();
     updateCustomCounts();
   }).catch(function() {
