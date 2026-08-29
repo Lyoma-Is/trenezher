@@ -1939,3 +1939,45 @@ body:not(.is-admin) .extra-item textarea {
   border-radius: 10px;
   padding: 8px;
 }
+
+
+.sync-status {
+  position: fixed;
+  left: 16px;
+  bottom: 72px;
+  z-index: 999;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.1rem;
+  color: var(--text-muted);
+  cursor: default;
+  user-select: none;
+}
+.sync-status.syncing {
+  color: var(--primary);
+  animation: sync-spin 0.8s linear infinite;
+}
+.sync-status.ok {
+  color: #16a34a;
+}
+.sync-status.err {
+  color: #dc2626;
+}
+@keyframes sync-spin {
+  to { transform: rotate(360deg); }
+}
+@media (max-width: 640px) {
+  .sync-status {
+    left: 12px;
+    bottom: 64px;
+    width: 36px;
+    height: 36px;
+  }
+}

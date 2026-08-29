@@ -147,7 +147,7 @@ function levelKey() {
 let cloudCache = null;
 let cloudLoading = false;
 let cloudSaveTimer = null;
-const RTDB_PATH = 'content/main';
+const FIRESTORE_DOC = 'content/main';
 
 function toArray(val) {
   if (!val) return [];
@@ -231,6 +231,27 @@ function normalizeStore(data) {
 
 let cloudSynced = false;
 let cloudWriteInFlight = false;
+let lastCloudUpdatedAt = null;
+
+function setSyncStatus(state, title) {
+  const el = document.getElementById('sync-status');
+  if (!el) return;
+  el.classList.remove('syncing', 'ok', 'err');
+  if (state === 'syncing') {
+    el.classList.add('syncing');
+    el.textContent = '⟳';
+  } else if (state === 'ok') {
+    el.classList.add('ok');
+    el.textContent = '✓';
+  } else if (state === 'err') {
+    el.classList.add('err');
+    el.textContent = '!';
+  } else {
+    el.textContent = '⟳';
+  }
+  el.title = title || 'Синхронизация';
+}
+
 
 function readLocalStore() {
   try {
@@ -277,82 +298,98 @@ function saveCustom(data) {
   cloudSynced = true;
   cacheLocally(normalized);
   updateCustomCounts();
+  setSyncStatus('syncing', 'Сохранение…');
   scheduleCloudSave(normalized);
 }
 
+
 function scheduleCloudSave(data) {
-  if (!firebaseReady || !window.firebase || !firebase.database) return;
+  if (!firebaseReady || !window.firebase || !firebase.firestore) {
+    setSyncStatus('err', 'Нет Firebase');
+    return;
+  }
   const user = firebase.auth().currentUser;
-  if (!user || user.uid !== ADMIN_UID) return;
+  if (!user || user.uid !== ADMIN_UID) {
+    setSyncStatus('err', 'Нужен вход админа для записи');
+    return;
+  }
   if (cloudSaveTimer) clearTimeout(cloudSaveTimer);
   cloudSaveTimer = setTimeout(function() {
-    pushToRealtime(data);
-  }, 150);
+    pushToCloud(data);
+  }, 120);
 }
 
 
-function pushToRealtime(data) {
+
+
+function pushToCloud(data) {
   return new Promise(function(resolve, reject) {
     try {
-      if (!firebaseReady || !window.firebase || !firebase.database) {
+      if (!firebaseReady || !window.firebase || !firebase.firestore) {
+        setSyncStatus('err', 'Нет Firestore');
         resolve(false);
         return;
       }
       const user = firebase.auth().currentUser;
       if (!user || user.uid !== ADMIN_UID) {
+        setSyncStatus('err', 'Нет прав записи');
         resolve(false);
         return;
       }
       const payload = JSON.parse(JSON.stringify(data || cloudCache || emptyStore()));
       payload.updatedAt = new Date().toISOString();
       payload.updatedBy = user.uid;
+      lastCloudUpdatedAt = payload.updatedAt;
       cloudWriteInFlight = true;
-      firebase.database().ref('content/main').set(payload)
+      setSyncStatus('syncing', 'Отправка в облако…');
+      firebase.firestore().doc(FIRESTORE_DOC).set(payload, { merge: false })
         .then(function() {
           cloudWriteInFlight = false;
           cloudCache = normalizeStore(payload);
           cloudSynced = true;
           cacheLocally(cloudCache);
-          console.log('Firebase: сохранено, элементов:', countContent(cloudCache));
+          setSyncStatus('ok', 'Синхронизировано: ' + countContent(cloudCache) + ' элементов');
+          console.log('Firestore sync OK', countContent(cloudCache));
           updateCustomCounts();
           resolve(true);
         })
         .catch(function(e) {
           cloudWriteInFlight = false;
-          console.error('Firebase save error', e);
-          appAlert('Не удалось сохранить в облако. Проверьте интернет и Rules Firebase.\n' + (e.message || e));
+          setSyncStatus('err', 'Ошибка записи: ' + (e.message || e));
+          console.error('Firestore save error', e);
+          appAlert('Не удалось синхронизировать с облаком.\n' + (e.message || e));
           reject(e);
         });
     } catch (e) {
       cloudWriteInFlight = false;
+      setSyncStatus('err', 'Ошибка');
       reject(e);
     }
   });
 }
+function pushToRealtime(data) { return pushToCloud(data); }
+
+function pushToRealtime(data) { return pushToCloud(data); }
+
 
 function applyCloudData(val, fromListen) {
   const form = document.getElementById('question-form');
   const formOpen = form && !form.classList.contains('hidden');
-  if (fromListen && formOpen && isAdmin()) {
-    return; // не сбивать форму редактирования
-  }
+  if (fromListen && formOpen && isAdmin()) return;
   if (fromListen && cloudWriteInFlight) return;
+  if (!val) return;
 
-  if (!val) {
-    if (!fromListen) {
-      cloudCache = emptyStore();
-      cloudSynced = true;
-      cacheLocally(cloudCache);
-      updateCustomCounts();
-      applyHomeSettings();
-    }
+  // не принимать более старую версию
+  if (val.updatedAt && lastCloudUpdatedAt && val.updatedAt < lastCloudUpdatedAt) {
     return;
   }
+  if (val.updatedAt) lastCloudUpdatedAt = val.updatedAt;
 
   const data = normalizeStore(val);
   cloudCache = data;
   cloudSynced = true;
   cacheLocally(data);
+  setSyncStatus('ok', 'Обновлено из облака: ' + countContent(data) + ' элементов');
   updateCustomCounts();
   applyHomeSettings();
   const manage = document.getElementById('manage-page');
@@ -361,8 +398,9 @@ function applyCloudData(val, fromListen) {
   }
 }
 
-function pullFromRealtime() {
-  if (!firebaseReady || !window.firebase || !firebase.database) {
+
+function pullFromCloud() {
+  if (!firebaseReady || !window.firebase || !firebase.firestore) {
     if (!cloudCache) cloudCache = readLocalStore();
     cloudSynced = true;
     updateCustomCounts();
@@ -373,33 +411,32 @@ function pullFromRealtime() {
     return Promise.resolve(!!(cloudCache && countContent(cloudCache)));
   }
   cloudLoading = true;
-  try { firebase.database().goOnline(); } catch (e) {}
+  setSyncStatus('syncing', 'Загрузка из облака…');
 
-  const loadPromise = firebase.database().ref('content/main').once('value')
+  const loadPromise = firebase.firestore().doc(FIRESTORE_DOC).get({ source: 'default' })
     .then(function(snap) {
       cloudLoading = false;
-      const val = snap.val();
-      if (val) {
-        const data = normalizeStore(val);
-        cloudCache = data;
-        cloudSynced = true;
-        cacheLocally(data);
-        updateCustomCounts();
-        applyHomeSettings();
+      if (snap.exists) {
+        const raw = snap.data();
+        if (raw && raw.updatedAt) lastCloudUpdatedAt = raw.updatedAt;
+        applyCloudData(raw, false);
+        setSyncStatus('ok', 'Загружено: ' + countContent(cloudCache) + ' элементов');
         return true;
       }
       cloudCache = emptyStore();
       cloudSynced = true;
       cacheLocally(cloudCache);
+      setSyncStatus('ok', 'Облако пусто');
       updateCustomCounts();
       applyHomeSettings();
       return false;
     })
     .catch(function(e) {
       cloudLoading = false;
-      console.error('Firebase load error', e);
+      console.error('Firestore load error', e);
       if (!cloudCache) cloudCache = readLocalStore();
       cloudSynced = true;
+      setSyncStatus('err', 'Ошибка загрузки');
       updateCustomCounts();
       applyHomeSettings();
       return false;
@@ -410,27 +447,36 @@ function pullFromRealtime() {
       if (cloudLoading) {
         cloudLoading = false;
         if (!cloudCache) cloudCache = readLocalStore();
+        setSyncStatus(countContent(cloudCache) ? 'ok' : 'err', 'Таймаут, показан кэш');
         resolve(false);
       }
-    }, 4000);
+    }, 6000);
   });
   return Promise.race([loadPromise, timeout]);
 }
+function pullFromRealtime() { return pullFromCloud(); }
+function migrateFromRtdbIfNeeded() { return Promise.resolve(false); }
+
+function pullFromRealtime() { return pullFromCloud(); }
+
+function migrateFromRtdbIfNeeded() {
+  return Promise.resolve(false);
+}
+
 
 
 /** Загрузка из облака — для всех устройств (ПК и телефон) */
 function ensureDataLoaded(force) {
   if (!cloudCache) cloudCache = readLocalStore();
 
-  if (!firebaseReady || !window.firebase || !firebase.database) {
+  if (!firebaseReady || !window.firebase || !firebase.firestore) {
     cloudSynced = true;
     return Promise.resolve(JSON.parse(JSON.stringify(cloudCache)));
   }
 
-  // быстро: отдать кэш, облако догрузить в фоне
   if (!force) {
     if (!cloudSynced) {
-      pullFromRealtime().then(function() {
+      pullFromCloud().then(function() {
         updateCustomCounts();
         applyHomeSettings();
       });
@@ -438,8 +484,7 @@ function ensureDataLoaded(force) {
     return Promise.resolve(JSON.parse(JSON.stringify(cloudCache)));
   }
 
-  try { firebase.database().goOnline(); } catch (e) {}
-  return pullFromRealtime().then(function() {
+  return pullFromCloud().then(function() {
     if (!cloudCache) cloudCache = emptyStore();
     cloudSynced = true;
     return JSON.parse(JSON.stringify(cloudCache));
@@ -449,6 +494,7 @@ function ensureDataLoaded(force) {
     return JSON.parse(JSON.stringify(cloudCache));
   });
 }
+
 
 
 function mergeStores(a, b) {
@@ -477,11 +523,15 @@ function syncLocalToCloudIfNeeded(snapshotBeforePull) {
   const local = snapshotBeforePull || readLocalStore();
   const cloud = cloudCache || emptyStore();
   const merged = mergeStores(local, cloud);
-  if (countContent(merged) > countContent(cloud)) {
+  const mergedN = countContent(merged);
+  const cloudN = countContent(cloud);
+  console.log('Sync merge: local', countContent(local), 'cloud', cloudN, 'merged', mergedN);
+  if (mergedN > cloudN) {
     cloudCache = merged;
     cloudSynced = true;
     cacheLocally(merged);
-    return pushToRealtime(merged).then(function() {
+    setSyncStatus('syncing', 'Выгрузка полных данных…');
+    return pushToCloud(merged).then(function() {
       updateCustomCounts();
       applyHomeSettings();
       return true;
@@ -490,12 +540,66 @@ function syncLocalToCloudIfNeeded(snapshotBeforePull) {
   return Promise.resolve(false);
 }
 
-function listenRealtime() {
-  if (!firebaseReady || !window.firebase || !firebase.database) return;
-  firebase.database().ref('content/main').on('value', function(snap) {
-    applyCloudData(snap.val(), true);
+
+function listenCloud() {
+  if (!firebaseReady || !window.firebase || !firebase.firestore) return;
+  if (window._fsUnsub) {
+    try { window._fsUnsub(); } catch (e) {}
+    window._fsUnsub = null;
+  }
+  window._fsUnsub = firebase.firestore().doc(FIRESTORE_DOC).onSnapshot(
+    { includeMetadataChanges: false },
+    function(snap) {
+      if (!snap.exists) return;
+      // игнор локальных echo при своей записи
+      if (cloudWriteInFlight) return;
+      const raw = snap.data();
+      applyCloudData(raw, true);
+    },
+    function(err) {
+      console.error('Firestore listen error', err);
+      setSyncStatus('err', 'Слушатель: ' + (err.message || err));
+    }
+  );
+}
+function listenRealtime() { listenCloud(); }
+
+function forceFullSync() {
+  setSyncStatus('syncing', 'Принудительная синхронизация…');
+  const localBefore = readLocalStore();
+  return pullFromCloud().then(function() {
+    if (isAdmin()) return syncLocalToCloudIfNeeded(localBefore);
+  }).then(function() {
+    updateCustomCounts();
+    applyHomeSettings();
+    const manage = document.getElementById('manage-page');
+    if (manage && manage.classList.contains('active')) renderQuestionsList();
+    setSyncStatus('ok', 'Синхронизация завершена');
+  }).catch(function() {
+    setSyncStatus('err', 'Сбой синхронизации');
   });
 }
+
+
+function listenRealtime() { listenCloud(); }
+
+function forceFullSync() {
+  setSyncStatus('syncing', 'Принудительная синхронизация…');
+  const localBefore = readLocalStore();
+  return pullFromCloud().then(function() {
+    if (isAdmin()) return syncLocalToCloudIfNeeded(localBefore);
+  }).then(function() {
+    updateCustomCounts();
+    applyHomeSettings();
+    const manage = document.getElementById('manage-page');
+    if (manage && manage.classList.contains('active')) renderQuestionsList();
+    setSyncStatus('ok', 'Синхронизация завершена');
+  }).catch(function() {
+    setSyncStatus('err', 'Сбой синхронизации');
+  });
+}
+
+
 
 function autoResizeTitle(el) {
   if (!el) el = document.getElementById('site-title');
@@ -2416,7 +2520,23 @@ function initFirebase() {
       firebase.initializeApp(cfg);
     }
     firebaseReady = true;
-    try { firebase.database().goOnline(); } catch (e) {}
+    // Кэширование Firestore в IndexedDB (офлайн / быстрый повторный вход)
+    try {
+      firebase.firestore().enablePersistence({ synchronizeTabs: true })
+        .then(function() { console.log('Firestore: persistence enabled'); })
+        .catch(function(err) {
+          if (err.code === 'failed-precondition') {
+            console.warn('Firestore persistence: открыто несколько вкладок');
+          } else if (err.code === 'unimplemented') {
+            console.warn('Firestore persistence не поддерживается браузером');
+          } else {
+            console.warn('Firestore persistence:', err);
+          }
+        });
+    } catch (e) {
+      console.warn('enablePersistence', e);
+    }
+    
 
     const auth = firebase.auth();
     auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL)
@@ -2559,7 +2679,7 @@ function tryAdminLogin() {
   }
   setAuthError('');
   if (btn) { btn.disabled = true; btn.textContent = 'Вход…'; }
-  try { firebase.database().goOnline(); } catch (e) {}
+  
 
   firebase.auth().setPersistence(firebase.auth.Auth.Persistence.LOCAL)
     .catch(function() { return null; })
@@ -2633,6 +2753,14 @@ document.addEventListener('DOMContentLoaded', () => {
     showPage('home-page');
   }
   document.addEventListener('paste', handleClipboardPaste);
+  const syncEl = document.getElementById('sync-status');
+  if (syncEl) syncEl.addEventListener('click', function() { forceFullSync(); });
+  document.addEventListener('visibilitychange', function() {
+    if (document.visibilityState === 'visible' && firebaseReady) {
+      pullFromCloud();
+    }
+  });
+
   function authEnter(e) {
     if (e.key === 'Enter') { e.preventDefault(); tryAdminLogin(); }
   }
