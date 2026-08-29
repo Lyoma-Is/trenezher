@@ -57,6 +57,52 @@ let currentQuiz = {
   states: []
 };
 
+const QUIZ_PROGRESS_KEY = 'teacher-trainer-quiz-progress';
+
+function saveQuizProgress() {
+  try {
+    if (!currentQuiz || !currentQuiz.questions || !currentQuiz.questions.length) {
+      sessionStorage.removeItem(QUIZ_PROGRESS_KEY);
+      return;
+    }
+    // не сохраняем огромные dataURL повторно лишний раз — уже в questions
+    const payload = {
+      quiz: currentQuiz,
+      timerSeconds: typeof quizTimerSeconds === 'number' ? quizTimerSeconds : 0,
+      savedAt: Date.now()
+    };
+    sessionStorage.setItem(QUIZ_PROGRESS_KEY, JSON.stringify(payload));
+  } catch (e) {
+    console.warn('Не удалось сохранить прогресс', e);
+  }
+}
+
+function clearQuizProgress() {
+  try { sessionStorage.removeItem(QUIZ_PROGRESS_KEY); } catch (e) {}
+}
+
+function restoreQuizProgress() {
+  try {
+    const raw = sessionStorage.getItem(QUIZ_PROGRESS_KEY);
+    if (!raw) return false;
+    const payload = JSON.parse(raw);
+    if (!payload || !payload.quiz || !payload.quiz.questions || !payload.quiz.questions.length) {
+      clearQuizProgress();
+      return false;
+    }
+    currentQuiz = payload.quiz;
+    quizTimerSeconds = payload.timerSeconds || 0;
+    showPage('quiz-page');
+    startQuizTimer(true); // continue without reset
+    renderQuestion();
+    return true;
+  } catch (e) {
+    console.warn('Не удалось восстановить прогресс', e);
+    clearQuizProgress();
+    return false;
+  }
+}
+
 let quizTimerInterval = null;
 let quizTimerSeconds = 0;
 
@@ -585,6 +631,7 @@ function showPage(pageId) {
 
 function goHome() {
   stopQuizTimer();
+  clearQuizProgress();
   showPage('home-page');
   currentQuiz = { questions: [], index: 0, score: 0, type: null, level: null, answered: false, selected: [], states: [] };
   editingId = null;
@@ -616,17 +663,22 @@ function stopQuizTimer() {
   }
 }
 
-function startQuizTimer() {
+function startQuizTimer(continueFromSaved) {
   stopQuizTimer();
-  quizTimerSeconds = 0;
+  if (!continueFromSaved) quizTimerSeconds = 0;
   const el = document.getElementById('question-timer');
-  if (el) el.textContent = '00:00';
+  if (el) {
+    const m = Math.floor(quizTimerSeconds / 60);
+    const s = quizTimerSeconds % 60;
+    el.textContent = String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+  }
   quizTimerInterval = setInterval(() => {
     quizTimerSeconds++;
     const m = Math.floor(quizTimerSeconds / 60);
     const s = quizTimerSeconds % 60;
     const el = document.getElementById('question-timer');
     if (el) el.textContent = String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+    if (quizTimerSeconds % 5 === 0) saveQuizProgress();
   }, 1000);
 }
 
@@ -719,6 +771,7 @@ function startGeneralQuiz(level) {
     showPage('quiz-page');
     startQuizTimer();
     renderQuestion();
+    saveQuizProgress();
   }).catch(function(e) {
     console.error(e);
     appAlert('Не удалось загрузить вопросы. Проверьте интернет и обновите страницу.');
@@ -864,11 +917,15 @@ function _startInformaticsQuizBody(level) {
   showPage('quiz-page');
   startQuizTimer();
   renderQuestion();
+  saveQuizProgress();
 }
 
 function updateQuestionSelect() {
   const sel = document.getElementById('question-select');
   if (!sel) return;
+  if (currentQuiz && currentQuiz.questions && currentQuiz.questions.length) {
+    saveQuizProgress();
+  }
   const total = currentQuiz.questions.length;
   let html = '';
   for (let i = 0; i < total; i++) {
@@ -1327,7 +1384,6 @@ function confirmFinish() {
 function nextQuestion() {
   const total = currentQuiz.questions.length;
   const states = currentQuiz.states || [];
-  // следующий неотвеченный после текущего; с конца — к началу
   let next = -1;
   for (let step = 1; step <= total; step++) {
     const i = (currentQuiz.index + step) % total;
@@ -1342,10 +1398,12 @@ function nextQuestion() {
   }
   currentQuiz.index = next;
   renderQuestion();
+  saveQuizProgress();
 }
 
 function showResults() {
   stopQuizTimer();
+  clearQuizProgress();
   const total = currentQuiz.questions.length;
   const correct = currentQuiz.score;
   const percent = total ? Math.round((correct / total) * 100) : 0;
@@ -1802,27 +1860,73 @@ function removeOptionField(btn) {
   if (row) row.remove();
 }
 
+function clearFieldErrors(root) {
+  root = root || document;
+  root.querySelectorAll('.field-error').forEach(function(el) { el.classList.remove('field-error'); });
+  root.querySelectorAll('.field-error-msg').forEach(function(el) { el.remove(); });
+}
+
+function markFieldError(el, message) {
+  if (!el) return;
+  el.classList.add('field-error');
+  const msg = document.createElement('div');
+  msg.className = 'field-error-msg';
+  msg.textContent = message;
+  const parent = el.closest('.form-group') || el.parentElement;
+  if (parent) {
+    const old = parent.querySelector('.field-error-msg');
+    if (old) old.remove();
+    parent.appendChild(msg);
+  }
+  try { el.focus(); } catch (e) {}
+}
+
 function saveQuestion() {
   if (manageMode === 'informatics') {
     saveTask();
     return;
   }
-  const text = document.getElementById('q-text').value.trim();
-  if (!text) { appAlert('Введите текст вопроса'); return; }
+  const form = document.getElementById('form-general') || document.getElementById('question-form');
+  clearFieldErrors(form);
+
+  const textEl = document.getElementById('q-text');
+  const text = (textEl && textEl.value || '').trim();
+  if (!text) {
+    markFieldError(textEl, 'Обязательное поле: текст вопроса');
+    appAlert('Заполните обязательные поля');
+    return;
+  }
 
   const fields = [...document.querySelectorAll('#options-fields .option-field')];
   const options = [];
   const correct = [];
+  let emptyOption = null;
   fields.forEach(row => {
-    const val = row.querySelector('.option-text').value.trim();
-    if (!val) return;
+    const input = row.querySelector('.option-text');
+    const val = (input && input.value || '').trim();
+    if (!val) {
+      if (!emptyOption) emptyOption = input;
+      return;
+    }
     if (row.querySelector('.opt-correct').checked) correct.push(options.length);
     options.push(val);
   });
-  if (options.length < 2) { appAlert('Добавьте минимум 2 варианта ответа'); return; }
-  if (correct.length === 0) { appAlert('Отметьте хотя бы один правильный ответ'); return; }
 
-  const explanation = document.getElementById('q-explanation').value.trim();
+  if (options.length < 2) {
+    if (emptyOption) markFieldError(emptyOption, 'Заполните вариант ответа');
+    const box = document.getElementById('options-fields');
+    if (box) markFieldError(box, 'Нужно минимум 2 заполненных варианта');
+    appAlert('Добавьте минимум 2 варианта ответа');
+    return;
+  }
+  if (correct.length === 0) {
+    const firstCb = document.querySelector('#options-fields .opt-correct');
+    markFieldError(firstCb || document.getElementById('options-fields'), 'Отметьте хотя бы один правильный ответ');
+    appAlert('Отметьте хотя бы один правильный ответ');
+    return;
+  }
+
+  const explanation = (document.getElementById('q-explanation').value || '').trim();
   const question = { kind: 'choice', text, options, correct, explanation };
   const data = loadCustom();
   const lk = levelKey();
@@ -1832,6 +1936,7 @@ function saveQuestion() {
     data[lk].general.unshift(question);
   }
   saveCustom(data);
+  clearFieldErrors(form);
   document.getElementById('question-form').classList.add('hidden');
   editingId = null;
   renderQuestionsList();
@@ -1975,31 +2080,49 @@ function startNewTaskInSector(sectorId) {
 }
 
 function saveTask() {
-  const answerType = document.querySelector('input[name="answer-type"]:checked').value;
+  const form = document.getElementById('form-task') || document.getElementById('question-form');
+  clearFieldErrors(form);
+
+  const answerTypeEl = document.querySelector('input[name="answer-type"]:checked');
+  const answerType = answerTypeEl ? answerTypeEl.value : 'text';
   const content = readBlocks('task-blocks');
-  if (!content.length) {
-    appAlert('Добавьте хотя бы один текст или картинку в задание');
-    return;
-  }
+  const titleEl = document.getElementById('task-title');
+  const title = (titleEl && titleEl.value.trim()) || '';
 
   let answerText = '';
   let answerTable = null;
+  let hasError = false;
+
+  if (!title) {
+    markFieldError(titleEl, 'Обязательное поле: название задания');
+    hasError = true;
+  }
+  if (!content.length) {
+    const box = document.getElementById('task-blocks');
+    markFieldError(box, 'Добавьте текст или картинку задания');
+    hasError = true;
+  }
   if (answerType === 'text') {
-    answerText = document.getElementById('answer-text').value.trim();
-    if (!answerText) { appAlert('Введите правильный текстовый ответ'); return; }
+    const ansEl = document.getElementById('answer-text');
+    answerText = (ansEl && ansEl.value || '').trim();
+    if (!answerText) {
+      markFieldError(ansEl, 'Обязательное поле: правильный ответ');
+      hasError = true;
+    }
   } else {
     answerTable = readEditTable('answer-table');
-    const hasAny = answerTable.some(r => r.some(c => c !== ''));
-    if (!hasAny) { appAlert('Заполните хотя бы одну ячейку таблицы'); return; }
+    const hasAny = answerTable.some(function(r) { return r.some(function(c) { return c !== ''; }); });
+    if (!hasAny) {
+      markFieldError(document.getElementById('answer-table'), 'Заполните хотя бы одну ячейку таблицы');
+      hasError = true;
+    }
+  }
+  if (hasError) {
+    appAlert('Заполните обязательные поля формы');
+    return;
   }
 
   const explanationBlocks = readBlocks('expl-blocks');
-  const titleEl = document.getElementById('task-title');
-  const title = (titleEl && titleEl.value.trim()) || '';
-  if (!title) {
-    appAlert('Введите название задания');
-    return;
-  }
   const task = {
     kind: 'task',
     title,
@@ -2373,8 +2496,15 @@ function tryAdminLogin() {
   const email = (document.getElementById('auth-login').value || '').trim();
   const password = document.getElementById('auth-password').value || '';
   const btn = document.querySelector('#auth-login-view .btn-primary');
-  if (!email || !password) {
-    setAuthError('Введите логин и пароль');
+  clearFieldErrors(document.getElementById('auth-login-view'));
+  if (!email) {
+    markFieldError(document.getElementById('auth-login'), 'Введите логин');
+    setAuthError('Заполните обязательные поля');
+    return;
+  }
+  if (!password) {
+    markFieldError(document.getElementById('auth-password'), 'Введите пароль');
+    setAuthError('Заполните обязательные поля');
     return;
   }
   if (!window.firebase || !firebase.auth) {
@@ -2458,6 +2588,10 @@ document.addEventListener('DOMContentLoaded', () => {
   updateCustomCounts();
   applyHomeSettings();
   applyAdminUI();
+  // восстановить прохождение после обновления страницы
+  if (!restoreQuizProgress()) {
+    showPage('home-page');
+  }
   document.addEventListener('paste', handleClipboardPaste);
   function authEnter(e) {
     if (e.key === 'Enter') { e.preventDefault(); tryAdminLogin(); }
