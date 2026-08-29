@@ -381,6 +381,22 @@ function pullFromRealtime() {
     });
 }
 
+function ensureDataLoaded() {
+  if (cloudSynced && cloudCache) {
+    return Promise.resolve(cloudCache);
+  }
+  if (firebaseReady && window.firebase && firebase.database) {
+    try { firebase.database().goOnline(); } catch (e) {}
+    return pullFromRealtime().then(function() {
+      return cloudCache || loadCustom();
+    });
+  }
+  const local = readLocalStore();
+  cloudCache = local;
+  cloudSynced = true;
+  return Promise.resolve(local);
+}
+
 function listenRealtime() {
   if (!firebaseReady || !window.firebase || !firebase.database) return;
   firebase.database().ref('content/main').on('value', function(snap) {
@@ -646,50 +662,51 @@ function tablesEqual(a, b) {
 }
 
 function startGeneralQuiz(level) {
-  const inputId = level === 'first' ? 'count-first' : 'count-highest';
-  const maxAllowed = level === 'first' ? 300 : 600;
-  let count = parseInt(document.getElementById(inputId).value, 10);
-  if (isNaN(count) || count < 1) count = 1;
-  if (count > maxAllowed) count = maxAllowed;
-  document.getElementById(inputId).value = count;
+  ensureDataLoaded().then(function() {
+    const inputId = level === 'first' ? 'count-first' : 'count-highest';
+    const maxAllowed = level === 'first' ? 300 : 600;
+    let count = parseInt(document.getElementById(inputId).value, 10);
+    if (isNaN(count) || count < 1) count = 1;
+    if (count > maxAllowed) count = maxAllowed;
+    document.getElementById(inputId).value = count;
 
-  const custom = loadCustom();
-  const levelKey = level === 'highest' ? 'highest' : 'first';
-  const pool = [
-    ...GENERAL_QUESTIONS.map(normalizeQuestion),
-    ...(custom[levelKey].general || [])
-  ];
-  if (!pool.length) {
-    appAlert('Вопросы не добавлены');
-    return;
-  }
-  let selected = [];
-  if (count <= pool.length) {
-    selected = shuffle(pool).slice(0, count);
-  } else {
-    while (selected.length < count) selected = selected.concat(shuffle(pool));
-    selected = selected.slice(0, count);
-  }
+    const custom = loadCustom();
+    const levelKey = level === 'highest' ? 'highest' : 'first';
+    const pool = [
+      ...GENERAL_QUESTIONS.map(normalizeQuestion),
+      ...(custom[levelKey].general || [])
+    ];
+    if (!pool.length) {
+      appAlert('Вопросы не добавлены');
+      return;
+    }
+    let selected = [];
+    if (count <= pool.length) {
+      selected = shuffle(pool).slice(0, count);
+    } else {
+      while (selected.length < count) selected = selected.concat(shuffle(pool));
+      selected = selected.slice(0, count);
+    }
 
-  const questions = selected.map(q => ({ ...q, qType: 'general' }));
-  currentQuiz = {
-    questions,
-    index: 0, score: 0, type: `general-${level}`, level: level,
-    answered: false, selected: [], states: initQuizStates(questions)
-  };
-  showPage('quiz-page');
-  startQuizTimer();
-  renderQuestion();
+    const questions = selected.map(q => ({ ...q, qType: 'general' }));
+    currentQuiz = {
+      questions,
+      index: 0, score: 0, type: `general-${level}`, level: level,
+      answered: false, selected: [], states: initQuizStates(questions)
+    };
+    showPage('quiz-page');
+    startQuizTimer();
+    renderQuestion();
+  });
 }
 
 function startInformaticsQuiz(level) {
-  // если облако ещё не подтянулось — подождать
-  if (!cloudSynced && firebaseReady) {
-    pullFromRealtime().then(function() {
-      startInformaticsQuiz(level);
-    });
-    return;
-  }
+  ensureDataLoaded().then(function() {
+    _startInformaticsQuizBody(level);
+  });
+}
+
+function _startInformaticsQuizBody(level) {
   const custom = loadCustom();
   const levelKey = level === 'highest' ? 'highest' : 'first';
   const generalPool = [
@@ -2175,7 +2192,7 @@ function initFirebase() {
   try {
     const cfg = window.FIREBASE_CONFIG || {};
     if (!cfg.apiKey || !cfg.authDomain || !cfg.projectId) {
-      console.warn('Firebase: заполните FIREBASE_CONFIG в firebase-config.js');
+      console.warn('Firebase: заполните FIREBASE_CONFIG');
       firebaseReady = false;
       return false;
     }
@@ -2188,35 +2205,48 @@ function initFirebase() {
       firebase.initializeApp(cfg);
     }
     firebaseReady = true;
-    try {
-      firebase.auth().setPersistence(firebase.auth.Auth.Persistence.LOCAL);
-    } catch (e) {}
-    firebase.auth().onAuthStateChanged(function(user) {
-      adminUser = null;
-      if (user && user.uid === ADMIN_UID) {
-        adminUser = user;
-        // подтянуть облако, затем при необходимости залить локальные данные (51 вопрос и т.д.)
-        pullFromRealtime().then(function() {
-          return syncLocalToCloudIfNeeded();
-        }).then(function() {
-          applyAdminUI();
-          updateCustomCounts();
-          applyHomeSettings();
-          const manage = document.getElementById('manage-page');
-          if (manage && manage.classList.contains('active')) renderQuestionsList();
+    try { firebase.database().goOnline(); } catch (e) {}
+
+    const auth = firebase.auth();
+    auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL)
+      .catch(function() {
+        return auth.setPersistence(firebase.auth.Auth.Persistence.SESSION);
+      })
+      .finally(function() {
+        auth.onAuthStateChanged(function(user) {
+          if (user && user.uid === ADMIN_UID) {
+            adminUser = user;
+            applyAdminUI();
+            ensureDataLoaded().then(function() {
+              return syncLocalToCloudIfNeeded();
+            }).then(function() {
+              updateCustomCounts();
+              applyHomeSettings();
+              const manage = document.getElementById('manage-page');
+              if (manage && manage.classList.contains('active')) renderQuestionsList();
+            });
+          } else if (user && user.uid !== ADMIN_UID) {
+            adminUser = null;
+            auth.signOut();
+            applyAdminUI();
+          } else {
+            adminUser = null;
+            applyAdminUI();
+          }
         });
-      } else if (user && user.uid !== ADMIN_UID) {
-        firebase.auth().signOut();
-        applyAdminUI();
-      } else {
-        applyAdminUI();
-      }
-    });
-    pullFromRealtime().then(function() {
+      });
+
+    ensureDataLoaded().then(function() {
       listenRealtime();
+      updateCustomCounts();
+      applyHomeSettings();
     });
-    setTimeout(function() { pullFromRealtime(); }, 1500);
-    setTimeout(function() { pullFromRealtime(); }, 4000);
+    setTimeout(function() {
+      ensureDataLoaded().then(function() { updateCustomCounts(); applyHomeSettings(); });
+    }, 2000);
+    setTimeout(function() {
+      ensureDataLoaded().then(function() { updateCustomCounts(); applyHomeSettings(); });
+    }, 5000);
     return true;
   } catch (e) {
     console.error('Firebase init error', e);
@@ -2294,16 +2324,31 @@ function setAuthError(msg) {
 function tryAdminLogin() {
   const email = (document.getElementById('auth-login').value || '').trim();
   const password = document.getElementById('auth-password').value || '';
+  const btn = document.querySelector('#auth-login-view .btn-primary');
   if (!email || !password) {
-    setAuthError('Введите email и пароль');
+    setAuthError('Введите логин и пароль');
+    return;
+  }
+  if (!window.firebase || !firebase.auth) {
+    setAuthError('Firebase не загружен. Обновите страницу.');
     return;
   }
   if (!firebaseReady) {
-    setAuthError('Firebase не настроен. Заполните firebase-config.js (apiKey, authDomain, projectId).');
+    try { initFirebase(); } catch (e) {}
+  }
+  if (!firebaseReady) {
+    setAuthError('Нет связи с Firebase. Проверьте интернет.');
     return;
   }
   setAuthError('');
-  firebase.auth().signInWithEmailAndPassword(email, password)
+  if (btn) { btn.disabled = true; btn.textContent = 'Вход…'; }
+  try { firebase.database().goOnline(); } catch (e) {}
+
+  firebase.auth().setPersistence(firebase.auth.Auth.Persistence.LOCAL)
+    .catch(function() { return null; })
+    .then(function() {
+      return firebase.auth().signInWithEmailAndPassword(email, password);
+    })
     .then(function(cred) {
       if (!cred.user || cred.user.uid !== ADMIN_UID) {
         return firebase.auth().signOut().then(function() {
@@ -2311,10 +2356,10 @@ function tryAdminLogin() {
         });
       }
       adminUser = cred.user;
-      pullFromRealtime().then(function() {
+      applyAdminUI();
+      return ensureDataLoaded().then(function() {
         return syncLocalToCloudIfNeeded();
       }).then(function() {
-        applyAdminUI();
         updateCustomCounts();
         applyHomeSettings();
         closeAuthPanel();
@@ -2322,13 +2367,17 @@ function tryAdminLogin() {
     })
     .catch(function(e) {
       var msg = 'Ошибка входа';
-      if (e && e.code === 'auth/invalid-credential') msg = 'Неверный email или пароль';
+      if (e && e.code === 'auth/invalid-credential') msg = 'Неверный логин или пароль';
       else if (e && e.code === 'auth/user-not-found') msg = 'Пользователь не найден';
       else if (e && e.code === 'auth/wrong-password') msg = 'Неверный пароль';
-      else if (e && e.code === 'auth/invalid-email') msg = 'Некорректный email';
-      else if (e && e.code === 'auth/too-many-requests') msg = 'Слишком много попыток. Попробуйте позже';
+      else if (e && e.code === 'auth/invalid-email') msg = 'Нужен email аккаунта Firebase';
+      else if (e && e.code === 'auth/too-many-requests') msg = 'Слишком много попыток. Позже.';
+      else if (e && e.code === 'auth/network-request-failed') msg = 'Нет сети. Проверьте интернет.';
       else if (e && e.message) msg = e.message;
       setAuthError(msg);
+    })
+    .finally(function() {
+      if (btn) { btn.disabled = false; btn.textContent = 'Войти'; }
     });
 }
 
@@ -2362,6 +2411,13 @@ document.addEventListener('DOMContentLoaded', () => {
   applyHomeSettings();
   applyAdminUI();
   document.addEventListener('paste', handleClipboardPaste);
+  function authEnter(e) {
+    if (e.key === 'Enter') { e.preventDefault(); tryAdminLogin(); }
+  }
+  const _ap = document.getElementById('auth-password');
+  const _al = document.getElementById('auth-login');
+  if (_ap) _ap.addEventListener('keydown', authEnter);
+  if (_al) _al.addEventListener('keydown', authEnter);
   document.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') closeAuthPanel();
   });
