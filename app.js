@@ -1325,9 +1325,23 @@ function confirmFinish() {
 }
 
 function nextQuestion() {
-  currentQuiz.index++;
-  if (currentQuiz.index >= currentQuiz.questions.length) showResults();
-  else renderQuestion();
+  const total = currentQuiz.questions.length;
+  const states = currentQuiz.states || [];
+  // следующий неотвеченный после текущего; с конца — к началу
+  let next = -1;
+  for (let step = 1; step <= total; step++) {
+    const i = (currentQuiz.index + step) % total;
+    if (!states[i] || !states[i].answered) {
+      next = i;
+      break;
+    }
+  }
+  if (next === -1) {
+    showResults();
+    return;
+  }
+  currentQuiz.index = next;
+  renderQuestion();
 }
 
 function showResults() {
