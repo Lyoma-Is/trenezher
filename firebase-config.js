@@ -13,5 +13,4 @@ window.FIREBASE_CONFIG = {
 // UID администратора
 window.ADMIN_UID = "tJqSbhZjNzL5Bm0vi7Umy8Kn3Vc2";
 
-// Кэш Firestore (IndexedDB) включается в app.js через enablePersistence
-window.USE_FIRESTORE = true;
+window.USE_FIRESTORE = false;

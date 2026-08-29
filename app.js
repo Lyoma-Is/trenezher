@@ -147,7 +147,7 @@ function levelKey() {
 let cloudCache = null;
 let cloudLoading = false;
 let cloudSaveTimer = null;
-const FIRESTORE_DOC = 'content/main';
+const RTDB_PATH = 'content/main';
 
 function toArray(val) {
   if (!val) return [];
@@ -254,7 +254,7 @@ function setSyncStatus(state, title) {
 
 
 function readLocalStore() {
-  // локальное хранение отключено — только память / Firestore
+  // локальное хранение отключено — только память / Realtime Database
   return emptyStore();
 }
 
@@ -273,7 +273,7 @@ function countContent(data) {
 }
 
 function cacheLocally(data) {
-  // localStorage отключён по требованию — данные только в Firestore и в памяти сессии
+  // localStorage отключён по требованию — данные только в Realtime Database и в памяти сессии
 }
 
 
@@ -300,15 +300,9 @@ function saveCustom(data) {
 
 
 function scheduleCloudSave(data) {
-  if (!firebaseReady || !window.firebase || !firebase.firestore) {
-    setSyncStatus('err', 'Нет Firebase');
-    return;
-  }
+  if (!firebaseReady || !window.firebase || !firebase.database) return;
   const user = firebase.auth().currentUser;
-  if (!user || user.uid !== ADMIN_UID) {
-    setSyncStatus('err', 'Нужен вход админа для записи');
-    return;
-  }
+  if (!user || user.uid !== ADMIN_UID) return;
   if (cloudSaveTimer) clearTimeout(cloudSaveTimer);
   cloudSaveTimer = setTimeout(function() {
     pushToCloud(data);
@@ -318,11 +312,12 @@ function scheduleCloudSave(data) {
 
 
 
+
 function pushToCloud(data) {
   return new Promise(function(resolve, reject) {
     try {
-      if (!firebaseReady || !window.firebase || !firebase.firestore) {
-        setSyncStatus('err', 'Нет Firestore');
+      if (!firebaseReady || !window.firebase || !firebase.database) {
+        setSyncStatus('err', 'Нет Realtime Database');
         resolve(false);
         return;
       }
@@ -338,22 +333,21 @@ function pushToCloud(data) {
       lastCloudUpdatedAt = payload.updatedAt;
       cloudWriteInFlight = true;
       setSyncStatus('syncing', 'Отправка в облако…');
-      firebase.firestore().doc(FIRESTORE_DOC).set(payload, { merge: false })
+      firebase.database().ref(RTDB_PATH).set(payload)
         .then(function() {
           cloudWriteInFlight = false;
           cloudCache = normalizeStore(payload);
           cloudSynced = true;
-          cacheLocally(cloudCache);
           setSyncStatus('ok', 'Синхронизировано: ' + countContent(cloudCache) + ' элементов');
-          console.log('Firestore sync OK', countContent(cloudCache));
+          console.log('RTDB sync OK', countContent(cloudCache));
           updateCustomCounts();
           resolve(true);
         })
         .catch(function(e) {
           cloudWriteInFlight = false;
           setSyncStatus('err', 'Ошибка записи: ' + (e.message || e));
-          console.error('Firestore save error', e);
-          appAlert('Не удалось синхронизировать с облаком.\n' + (e.message || e));
+          console.error('RTDB save error', e);
+          appAlert('Не удалось сохранить в Firebase.\n' + (e.message || e));
           reject(e);
         });
     } catch (e) {
@@ -363,6 +357,8 @@ function pushToCloud(data) {
     }
   });
 }
+function pushToRealtime(data) { return pushToCloud(data); }
+
 function pushToRealtime(data) { return pushToCloud(data); }
 
 function pushToRealtime(data) { return pushToCloud(data); }
@@ -396,8 +392,7 @@ function applyCloudData(val, fromListen) {
 
 
 function pullFromCloud() {
-  if (!firebaseReady || !window.firebase || !firebase.firestore) {
-    try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
+  if (!firebaseReady || !window.firebase || !firebase.database) {
     if (!cloudCache) cloudCache = emptyStore();
     cloudSynced = true;
     updateCustomCounts();
@@ -409,20 +404,23 @@ function pullFromCloud() {
   }
   cloudLoading = true;
   setSyncStatus('syncing', 'Загрузка из облака…');
+  try { firebase.database().goOnline(); } catch (e) {}
 
-  const loadPromise = firebase.firestore().doc(FIRESTORE_DOC).get({ source: 'default' })
+  const loadPromise = firebase.database().ref(RTDB_PATH).once('value')
     .then(function(snap) {
       cloudLoading = false;
-      if (snap.exists) {
-        const raw = snap.data();
-        if (raw && raw.updatedAt) lastCloudUpdatedAt = raw.updatedAt;
-        applyCloudData(raw, false);
-        setSyncStatus('ok', 'Загружено: ' + countContent(cloudCache) + ' элементов');
+      const val = snap.val();
+      if (val) {
+        if (val.updatedAt) lastCloudUpdatedAt = val.updatedAt;
+        applyCloudData(val, false);
+        const n = countContent(cloudCache);
+        setSyncStatus('ok', 'Загружено: ' + n + ' элементов');
+        console.log('RTDB loaded', n,
+          'first.general=', (cloudCache.first && cloudCache.first.general || []).length);
         return true;
       }
       cloudCache = emptyStore();
       cloudSynced = true;
-      cacheLocally(cloudCache);
       setSyncStatus('ok', 'Облако пусто');
       updateCustomCounts();
       applyHomeSettings();
@@ -430,9 +428,8 @@ function pullFromCloud() {
     })
     .catch(function(e) {
       cloudLoading = false;
-      console.error('Firestore load error', e);
-      try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
-    if (!cloudCache) cloudCache = emptyStore();
+      console.error('RTDB load error', e);
+      if (!cloudCache) cloudCache = emptyStore();
       cloudSynced = true;
       setSyncStatus('err', 'Ошибка загрузки');
       updateCustomCounts();
@@ -444,15 +441,17 @@ function pullFromCloud() {
     setTimeout(function() {
       if (cloudLoading) {
         cloudLoading = false;
-        try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
-    if (!cloudCache) cloudCache = emptyStore();
-        setSyncStatus(countContent(cloudCache) ? 'ok' : 'err', 'Таймаут, показан кэш');
+        if (!cloudCache) cloudCache = emptyStore();
+        setSyncStatus(countContent(cloudCache) ? 'ok' : 'err', 'Таймаут загрузки');
         resolve(false);
       }
     }, 6000);
   });
   return Promise.race([loadPromise, timeout]);
 }
+function pullFromRealtime() { return pullFromCloud(); }
+function migrateFromRtdbIfNeeded() { return Promise.resolve(false); }
+
 function pullFromRealtime() { return pullFromCloud(); }
 function migrateFromRtdbIfNeeded() { return Promise.resolve(false); }
 
@@ -466,10 +465,9 @@ function migrateFromRtdbIfNeeded() {
 
 /** Загрузка из облака — для всех устройств (ПК и телефон) */
 function ensureDataLoaded(force) {
-  try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
-    if (!cloudCache) cloudCache = emptyStore();
+  if (!cloudCache) cloudCache = emptyStore();
 
-  if (!firebaseReady || !window.firebase || !firebase.firestore) {
+  if (!firebaseReady || !window.firebase || !firebase.database) {
     cloudSynced = true;
     return Promise.resolve(JSON.parse(JSON.stringify(cloudCache)));
   }
@@ -484,17 +482,18 @@ function ensureDataLoaded(force) {
     return Promise.resolve(JSON.parse(JSON.stringify(cloudCache)));
   }
 
+  try { firebase.database().goOnline(); } catch (e) {}
   return pullFromCloud().then(function() {
     if (!cloudCache) cloudCache = emptyStore();
     cloudSynced = true;
     return JSON.parse(JSON.stringify(cloudCache));
   }).catch(function() {
-    try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
     if (!cloudCache) cloudCache = emptyStore();
     cloudSynced = true;
     return JSON.parse(JSON.stringify(cloudCache));
   });
 }
+
 
 
 
@@ -520,37 +519,31 @@ function mergeStores(a, b) {
 
 /** Один раз: залить с ПК более полные данные в облако после входа админа */
 function syncLocalToCloudIfNeeded(snapshotBeforePull) {
-  // локальное хранение отключено — синхронизация только через Firestore
+  // локальное хранение отключено — синхронизация только через Realtime Database
   return Promise.resolve(false);
 }
 
 
 
 function listenCloud() {
-  if (!firebaseReady || !window.firebase || !firebase.firestore) return;
-  if (window._fsUnsub) {
-    try { window._fsUnsub(); } catch (e) {}
-    window._fsUnsub = null;
-  }
-  window._fsUnsub = firebase.firestore().doc(FIRESTORE_DOC).onSnapshot(
-    { includeMetadataChanges: false },
-    function(snap) {
-      if (!snap.exists) return;
-      // игнор локальных echo при своей записи
-      if (cloudWriteInFlight) return;
-      const raw = snap.data();
-      applyCloudData(raw, true);
-    },
-    function(err) {
-      console.error('Firestore listen error', err);
-      setSyncStatus('err', 'Слушатель: ' + (err.message || err));
-    }
-  );
+  if (!firebaseReady || !window.firebase || !firebase.database) return;
+  firebase.database().ref(RTDB_PATH).off();
+  firebase.database().ref(RTDB_PATH).on('value', function(snap) {
+    if (cloudWriteInFlight) return;
+    const val = snap.val();
+    if (!val) return;
+    applyCloudData(val, true);
+  }, function(err) {
+    console.error('RTDB listen error', err);
+    setSyncStatus('err', 'Слушатель: ' + (err.message || err));
+  });
 }
 function listenRealtime() { listenCloud(); }
 
+function listenRealtime() { listenCloud(); }
+
 function forceFullSync() {
-  setSyncStatus('syncing', 'Загрузка из Firestore…');
+  setSyncStatus('syncing', 'Загрузка из Realtime Database…');
   cloudCache = null;
   cloudSynced = false;
   return pullFromCloud().then(function() {
@@ -2505,22 +2498,7 @@ function initFirebase() {
       firebase.initializeApp(cfg);
     }
     firebaseReady = true;
-    // Кэширование Firestore в IndexedDB (офлайн / быстрый повторный вход)
-    try {
-      firebase.firestore().enablePersistence({ synchronizeTabs: true })
-        .then(function() { console.log('Firestore: persistence enabled'); })
-        .catch(function(err) {
-          if (err.code === 'failed-precondition') {
-            console.warn('Firestore persistence: открыто несколько вкладок');
-          } else if (err.code === 'unimplemented') {
-            console.warn('Firestore persistence не поддерживается браузером');
-          } else {
-            console.warn('Firestore persistence:', err);
-          }
-        });
-    } catch (e) {
-      console.warn('enablePersistence', e);
-    }
+    try { firebase.database().goOnline(); } catch (e) {}
     
 
     const auth = firebase.auth();
