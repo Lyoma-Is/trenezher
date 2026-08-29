@@ -42,6 +42,49 @@ function sanitizeText(s, maxLen) {
   return t;
 }
 
+// —— Сжатие картинок перед сохранением ——
+// Картинки хранятся как base64 прямо в документе Firebase, поэтому крупные
+// исходники сильно замедляют загрузку данных. Пережимаем в JPEG с разумным
+// максимальным размером стороны — это на порядок уменьшает вес документа.
+function compressImageDataUrl(rawDataUrl, opts) {
+  opts = opts || {};
+  const maxDim = opts.maxDim || 1600;
+  const quality = opts.quality || 0.82;
+  return new Promise(function(resolve) {
+    if (!rawDataUrl || /^data:image\/gif/i.test(rawDataUrl)) {
+      // GIF не трогаем — canvas.toDataURL убьёт анимацию
+      resolve(rawDataUrl);
+      return;
+    }
+    try {
+      const img = new Image();
+      img.onload = function() {
+        const w = img.naturalWidth, h = img.naturalHeight;
+        if (!w || !h) { resolve(rawDataUrl); return; }
+        const scale = Math.min(1, maxDim / Math.max(w, h));
+        const cw = Math.max(1, Math.round(w * scale));
+        const ch = Math.max(1, Math.round(h * scale));
+        try {
+          const canvas = document.createElement('canvas');
+          canvas.width = cw;
+          canvas.height = ch;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, cw, ch);
+          const out = canvas.toDataURL('image/jpeg', quality);
+          // используем сжатый вариант, только если он реально меньше исходного
+          resolve(out && out.length < rawDataUrl.length ? out : rawDataUrl);
+        } catch (e) {
+          resolve(rawDataUrl);
+        }
+      };
+      img.onerror = function() { resolve(rawDataUrl); };
+      img.src = rawDataUrl;
+    } catch (e) {
+      resolve(rawDataUrl);
+    }
+  });
+}
+
 
 
 let currentQuiz = {
@@ -148,6 +191,9 @@ let cloudCache = null;
 let cloudLoading = false;
 let cloudSaveTimer = null;
 const RTDB_PATH = 'content/main';
+// updatedAt сервера, на который были синхронизированы данные каждого уровня —
+// позволяет не перекачивать уровень повторно, если он уже актуален
+let categoryFreshness = { first: null, highest: null };
 
 function toArray(val) {
   if (!val) return [];
@@ -386,12 +432,6 @@ function pushToCloud(data) {
 }
 function pushToRealtime(data) { return pushToCloud(data); }
 
-function pushToRealtime(data) { return pushToCloud(data); }
-
-function pushToRealtime(data) { return pushToCloud(data); }
-
-function pushToRealtime(data) { return pushToCloud(data); }
-
 
 function applyCloudData(val, fromListen) {
   if (!val) return;
@@ -483,6 +523,8 @@ function pullFromCloud() {
     }
     if (updatedVal) lastCloudUpdatedAt = updatedVal;
     store.updatedAt = updatedVal || null;
+    categoryFreshness.first = updatedVal || null;
+    categoryFreshness.highest = updatedVal || null;
 
     cloudCache = store;
     cloudSynced = true;
@@ -515,19 +557,72 @@ function pullFromCloud() {
 function pullFromRealtime() { return pullFromCloud(); }
 function migrateFromRtdbIfNeeded() { return Promise.resolve(false); }
 
-function pullFromRealtime() { return pullFromCloud(); }
-function migrateFromRtdbIfNeeded() { return Promise.resolve(false); }
+/**
+ * Лёгкая загрузка: только заголовок сайта, доп.блоки и метка updatedAt —
+ * без самих вопросов/заданий/картинок. Этого достаточно для главной страницы;
+ * конкретный уровень (first/highest) подгружается лениво через pullCategory,
+ * когда пользователь реально открывает тест или раздел управления.
+ */
+function pullMetaFromCloud() {
+  if (!firebaseReady || !window.firebase || !firebase.database) {
+    if (!cloudCache) cloudCache = readLocalStore();
+    cloudSynced = true;
+    return Promise.resolve(false);
+  }
+  setSyncStatus('syncing', 'Загрузка…');
+  const db = firebase.database();
+  return Promise.all([
+    db.ref(RTDB_PATH + '/siteTitle').once('value'),
+    db.ref(RTDB_PATH + '/extraBlocks').once('value'),
+    db.ref(RTDB_PATH + '/updatedAt').once('value')
+  ]).then(function(results) {
+    const titleVal = results[0].val();
+    const blocksVal = results[1].val();
+    const updatedVal = results[2].val();
+    if (!cloudCache) cloudCache = readLocalStore();
+    if (titleVal) cloudCache.siteTitle = sanitizeText(String(titleVal), 200);
+    if (blocksVal) {
+      cloudCache.extraBlocks = toArray(blocksVal).map(function(b) {
+        if (!b || typeof b !== 'object') return null;
+        if (b.type === 'link') {
+          return { type: 'link', text: sanitizeText(b.text, 500), url: sanitizeUrl(b.url) };
+        }
+        return { type: 'text', value: sanitizeText(b.value, 5000) };
+      }).filter(Boolean);
+    }
+    if (updatedVal) lastCloudUpdatedAt = updatedVal;
+    cloudCache.updatedAt = updatedVal || null;
+    cloudSynced = true;
+    cacheLocally(cloudCache);
+    setSyncStatus('ok', 'Готово');
+    return true;
+  }).catch(function(e) {
+    console.error(e);
+    if (!cloudCache) cloudCache = readLocalStore();
+    cloudSynced = true;
+    setSyncStatus('err', 'Ошибка загрузки');
+    return false;
+  });
+}
 
-function pullFromRealtime() { return pullFromCloud(); }
-function migrateFromRtdbIfNeeded() { return Promise.resolve(false); }
-
-function pullFromRealtime() { return pullFromCloud(); }
-function migrateFromRtdbIfNeeded() { return Promise.resolve(false); }
-
-function pullFromRealtime() { return pullFromCloud(); }
-
-function migrateFromRtdbIfNeeded() {
-  return Promise.resolve(false);
+/** Точечно обновляет только те категории (first/highest), которые уже были
+ * загружены в текущей сессии — вместо перекачки всего документа целиком. */
+function refreshLoadedCategories() {
+  const jobs = [];
+  ['first', 'highest'].forEach(function(lk) {
+    const side = cloudCache && cloudCache[lk];
+    const hasContent = side && (
+      (side.general && side.general.length) ||
+      (side.sectors && side.sectors.length)
+    );
+    if (hasContent) jobs.push(pullCategory(lk));
+  });
+  return Promise.all(jobs).then(function() {
+    updateCustomCounts();
+    applyHomeSettings();
+    const manage = document.getElementById('manage-page');
+    if (manage && manage.classList.contains('active')) renderQuestionsList();
+  });
 }
 
 
@@ -541,10 +636,16 @@ function pullCategory(levelKey) {
     return Promise.resolve(null);
   }
   setSyncStatus('syncing', 'Загрузка…');
-  return firebase.database().ref(RTDB_PATH + '/' + levelKey).once('value')
-    .then(function(snap) {
-      const val = snap.val();
+  return Promise.all([
+    firebase.database().ref(RTDB_PATH + '/' + levelKey).once('value'),
+    firebase.database().ref(RTDB_PATH + '/updatedAt').once('value')
+  ])
+    .then(function(results) {
+      const val = results[0].val();
+      const updatedVal = results[1].val();
       if (!cloudCache) cloudCache = emptyStore();
+      if (updatedVal) lastCloudUpdatedAt = updatedVal;
+      categoryFreshness[levelKey] = updatedVal || null;
       if (val) {
         const side = {
           general: toArray(val.general).map(normalizeQuestion),
@@ -578,12 +679,19 @@ function pullCategory(levelKey) {
     });
 }
 
+/** Загружает уровень, только если он ещё не подтягивался в этой сессии
+ * или устарел (сервер сообщил новый updatedAt после последней синхронизации
+ * этого уровня) — иначе просто отдаёт то, что уже в памяти. */
 function ensureCategoryLoaded(level) {
   const lk = level === 'highest' ? 'highest' : 'first';
-  if (cloudCache && cloudCache[lk] &&
-      ((cloudCache[lk].general && cloudCache[lk].general.length) ||
-       (cloudCache[lk].sectors && cloudCache[lk].sectors.length))) {
-    return Promise.resolve(cloudCache[lk]);
+  const side = cloudCache && cloudCache[lk];
+  const hasContent = side && (
+    (side.general && side.general.length) ||
+    (side.sectors && side.sectors.length)
+  );
+  const isFresh = hasContent && lastCloudUpdatedAt && categoryFreshness[lk] === lastCloudUpdatedAt;
+  if (isFresh) {
+    return Promise.resolve(side);
   }
   return pullCategory(lk);
 }
@@ -655,36 +763,14 @@ function listenCloud() {
     const ts = snap.val();
     if (!ts) return;
     if (lastCloudUpdatedAt && ts === lastCloudUpdatedAt) return;
-    // изменилось в облаке — подтянуть данные (с дебаунсом)
+    // изменилось в облаке — подтянуть только метаданные и уже загруженные
+    // категории (а не весь документ целиком), с дебаунсом
     if (window._syncDebounce) clearTimeout(window._syncDebounce);
     window._syncDebounce = setTimeout(function() {
-      lastCloudUpdatedAt = ts;
-      pullFromCloud();
+      pullMetaFromCloud().then(refreshLoadedCategories);
     }, 300);
   });
 }
-function listenRealtime() { listenCloud(); }
-
-function listenRealtime() { listenCloud(); }
-
-function listenRealtime() { listenCloud(); }
-
-function forceFullSync() {
-  setSyncStatus('syncing', 'Синхронизация…');
-  return pullFromCloud().then(function() {
-    updateCustomCounts();
-    applyHomeSettings();
-    const manage = document.getElementById('manage-page');
-    if (manage && manage.classList.contains('active')) renderQuestionsList();
-    setSyncStatus('ok', 'Синхронизировано: ' + countContent(cloudCache || emptyStore()) + ' элементов');
-  }).catch(function() {
-    setSyncStatus('err', 'Сбой синхронизации');
-  });
-}
-
-
-
-
 function listenRealtime() { listenCloud(); }
 
 function forceFullSync() {
@@ -1869,14 +1955,16 @@ function onBlockImage(input) {
   }
   const reader = new FileReader();
   reader.onload = () => {
-    const src = sanitizeImageSrc(reader.result);
-    if (!src) {
+    const raw = sanitizeImageSrc(reader.result);
+    if (!raw) {
       appAlert('Некорректный файл изображения');
       return;
     }
-    const item = input.closest('.block-item');
-    item.dataset.src = src;
-    item.querySelector('.image-preview').innerHTML = `<img src="${src}" alt="">`;
+    compressImageDataUrl(raw).then(function(src) {
+      const item = input.closest('.block-item');
+      item.dataset.src = src;
+      item.querySelector('.image-preview').innerHTML = `<img src="${src}" alt="">`;
+    });
   };
   reader.readAsDataURL(file);
 }
@@ -1918,7 +2006,9 @@ function fileToDataUrl(file) {
       return;
     }
     const reader = new FileReader();
-    reader.onload = function() { resolve(reader.result); };
+    reader.onload = function() {
+      compressImageDataUrl(reader.result).then(resolve).catch(function() { resolve(reader.result); });
+    };
     reader.onerror = reject;
     reader.readAsDataURL(file);
   });
@@ -2661,7 +2751,9 @@ function initFirebase() {
     }
     updateCustomCounts();
     applyHomeSettings();
-    pullFromCloud().then(function() {
+    // На старте грузим только заголовок/доп.блоки — вопросы и задания
+    // подтягиваются лениво при открытии конкретного теста/раздела
+    pullMetaFromCloud().then(function() {
       listenCloud();
       updateCustomCounts();
       applyHomeSettings();
@@ -2843,7 +2935,13 @@ document.addEventListener('DOMContentLoaded', () => {
   if (syncEl) syncEl.addEventListener('click', function() { forceFullSync(); });
   document.addEventListener('visibilitychange', function() {
     if (document.visibilityState === 'visible' && firebaseReady) {
-      pullFromCloud();
+      const prevUpdatedAt = lastCloudUpdatedAt;
+      pullMetaFromCloud().then(function() {
+        if (lastCloudUpdatedAt !== prevUpdatedAt) {
+          refreshLoadedCategories();
+        }
+        applyHomeSettings();
+      });
     }
   });
 
