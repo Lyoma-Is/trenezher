@@ -254,9 +254,13 @@ function setSyncStatus(state, title) {
 
 
 function readLocalStore() {
-  // локальное хранение отключено — только память / Realtime Database
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) return normalizeStore(JSON.parse(raw));
+  } catch (e) {}
   return emptyStore();
 }
+
 
 
 function countContent(data) {
@@ -273,15 +277,26 @@ function countContent(data) {
 }
 
 function cacheLocally(data) {
-  // localStorage отключён по требованию — данные только в Realtime Database и в памяти сессии
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  } catch (e) {
+    console.warn('localStorage', e);
+  }
 }
+
 
 
 /** Всегда из памяти после синка; до синка — из local только как временный кэш */
 function loadCustom() {
   if (cloudCache) return JSON.parse(JSON.stringify(cloudCache));
+  const local = readLocalStore();
+  if (countContent(local) > 0) {
+    cloudCache = local;
+    return JSON.parse(JSON.stringify(local));
+  }
   return emptyStore();
 }
+
 
 
 /**
@@ -299,6 +314,7 @@ function saveCustom(data) {
 }
 
 
+
 function scheduleCloudSave(data) {
   if (!firebaseReady || !window.firebase || !firebase.database) return;
   const user = firebase.auth().currentUser;
@@ -306,8 +322,9 @@ function scheduleCloudSave(data) {
   if (cloudSaveTimer) clearTimeout(cloudSaveTimer);
   cloudSaveTimer = setTimeout(function() {
     pushToCloud(data);
-  }, 120);
+  }, 250);
 }
+
 
 
 
@@ -327,26 +344,36 @@ function pushToCloud(data) {
         resolve(false);
         return;
       }
-      const payload = JSON.parse(JSON.stringify(data || cloudCache || emptyStore()));
-      payload.updatedAt = new Date().toISOString();
-      payload.updatedBy = user.uid;
-      lastCloudUpdatedAt = payload.updatedAt;
+      const payload = normalizeStore(data || cloudCache || emptyStore());
+      const updatedAt = new Date().toISOString();
+      lastCloudUpdatedAt = updatedAt;
       cloudWriteInFlight = true;
-      setSyncStatus('syncing', 'Отправка в облако…');
-      firebase.database().ref(RTDB_PATH).set(payload)
+      setSyncStatus('syncing', 'Отправка…');
+
+      const base = firebase.database().ref(RTDB_PATH);
+      // точечная запись по веткам — быстрее, чем один огромный set всего объекта
+      const updates = {};
+      updates[RTDB_PATH + '/first'] = payload.first;
+      updates[RTDB_PATH + '/highest'] = payload.highest;
+      updates[RTDB_PATH + '/siteTitle'] = payload.siteTitle || '';
+      updates[RTDB_PATH + '/extraBlocks'] = payload.extraBlocks || [];
+      updates[RTDB_PATH + '/updatedAt'] = updatedAt;
+      updates[RTDB_PATH + '/updatedBy'] = user.uid;
+
+      firebase.database().ref().update(updates)
         .then(function() {
           cloudWriteInFlight = false;
-          cloudCache = normalizeStore(payload);
+          cloudCache = payload;
           cloudSynced = true;
-          setSyncStatus('ok', 'Синхронизировано: ' + countContent(cloudCache) + ' элементов');
-          console.log('RTDB sync OK', countContent(cloudCache));
+          cacheLocally(payload);
+          setSyncStatus('ok', 'Синхронизировано: ' + countContent(payload) + ' элементов');
           updateCustomCounts();
           resolve(true);
         })
         .catch(function(e) {
           cloudWriteInFlight = false;
-          setSyncStatus('err', 'Ошибка записи: ' + (e.message || e));
-          console.error('RTDB save error', e);
+          setSyncStatus('err', 'Ошибка записи');
+          console.error(e);
           appAlert('Не удалось сохранить в Firebase.\n' + (e.message || e));
           reject(e);
         });
@@ -363,25 +390,29 @@ function pushToRealtime(data) { return pushToCloud(data); }
 
 function pushToRealtime(data) { return pushToCloud(data); }
 
+function pushToRealtime(data) { return pushToCloud(data); }
+
 
 function applyCloudData(val, fromListen) {
+  if (!val) return;
   const form = document.getElementById('question-form');
   const formOpen = form && !form.classList.contains('hidden');
   if (fromListen && formOpen && isAdmin()) return;
   if (fromListen && cloudWriteInFlight) return;
-  if (!val) return;
 
-  // не принимать более старую версию
-  if (val.updatedAt && lastCloudUpdatedAt && val.updatedAt < lastCloudUpdatedAt) {
-    return;
-  }
+  if (val.updatedAt && lastCloudUpdatedAt && val.updatedAt < lastCloudUpdatedAt) return;
   if (val.updatedAt) lastCloudUpdatedAt = val.updatedAt;
 
   const data = normalizeStore(val);
+  // пропуск лишней перерисовки, если объём тот же и это listener
+  if (fromListen && cloudCache && countContent(data) === countContent(cloudCache) &&
+      data.updatedAt === cloudCache.updatedAt) {
+    return;
+  }
   cloudCache = data;
   cloudSynced = true;
   cacheLocally(data);
-  setSyncStatus('ok', 'Обновлено из облака: ' + countContent(data) + ' элементов');
+  setSyncStatus('ok', 'Обновлено: ' + countContent(data) + ' элементов');
   updateCustomCounts();
   applyHomeSettings();
   const manage = document.getElementById('manage-page');
@@ -391,12 +422,11 @@ function applyCloudData(val, fromListen) {
 }
 
 
+
 function pullFromCloud() {
   if (!firebaseReady || !window.firebase || !firebase.database) {
-    if (!cloudCache) cloudCache = emptyStore();
+    if (!cloudCache) cloudCache = readLocalStore();
     cloudSynced = true;
-    updateCustomCounts();
-    applyHomeSettings();
     return Promise.resolve(false);
   }
   if (cloudLoading) {
@@ -406,95 +436,85 @@ function pullFromCloud() {
   setSyncStatus('syncing', 'Загрузка…');
   try { firebase.database().goOnline(); } catch (e) {}
 
-  // параллельно: first, highest, meta (title/blocks) — быстрее чем один огромный snapshot
   const db = firebase.database();
   const base = RTDB_PATH;
-  const pFirst = db.ref(base + '/first').once('value');
-  const pHighest = db.ref(base + '/highest').once('value');
-  const pTitle = db.ref(base + '/siteTitle').once('value');
-  const pBlocks = db.ref(base + '/extraBlocks').once('value');
-  const pUpdated = db.ref(base + '/updatedAt').once('value');
+  // параллельные лёгкие ветки
+  const loadPromise = Promise.all([
+    db.ref(base + '/first').once('value'),
+    db.ref(base + '/highest').once('value'),
+    db.ref(base + '/siteTitle').once('value'),
+    db.ref(base + '/extraBlocks').once('value'),
+    db.ref(base + '/updatedAt').once('value')
+  ]).then(function(results) {
+    cloudLoading = false;
+    const firstVal = results[0].val();
+    const highestVal = results[1].val();
+    const titleVal = results[2].val();
+    const blocksVal = results[3].val();
+    const updatedVal = results[4].val();
 
-  const loadPromise = Promise.all([pFirst, pHighest, pTitle, pBlocks, pUpdated])
-    .then(function(results) {
-      cloudLoading = false;
-      const firstVal = results[0].val();
-      const highestVal = results[1].val();
-      const titleVal = results[2].val();
-      const blocksVal = results[3].val();
-      const updatedVal = results[4].val();
+    const store = emptyStore();
+    function mapSide(val) {
+      if (!val) return { general: [], sectors: [] };
+      return {
+        general: toArray(val.general).map(normalizeQuestion),
+        sectors: toArray(val.sectors).map(function(s) {
+          s = s || {};
+          return {
+            id: s.id || newSectorId(),
+            name: s.name || 'Сектор',
+            count: Math.max(0, parseInt(s.count, 10) || 0),
+            tasks: toArray(s.tasks).map(normalizeTaskItem)
+          };
+        })
+      };
+    }
+    store.first = mapSide(firstVal);
+    store.highest = mapSide(highestVal);
+    if (titleVal) store.siteTitle = sanitizeText(String(titleVal), 200);
+    if (blocksVal) {
+      store.extraBlocks = toArray(blocksVal).map(function(b) {
+        if (!b || typeof b !== 'object') return null;
+        if (b.type === 'link') {
+          return { type: 'link', text: sanitizeText(b.text, 500), url: sanitizeUrl(b.url) };
+        }
+        return { type: 'text', value: sanitizeText(b.value, 5000) };
+      }).filter(Boolean);
+    }
+    if (updatedVal) lastCloudUpdatedAt = updatedVal;
+    store.updatedAt = updatedVal || null;
 
-      const store = emptyStore();
-      if (firstVal) {
-        store.first = {
-          general: toArray(firstVal.general).map(normalizeQuestion),
-          sectors: toArray(firstVal.sectors).map(function(s) {
-            s = s || {};
-            return {
-              id: s.id || newSectorId(),
-              name: s.name || 'Сектор',
-              count: Math.max(0, parseInt(s.count, 10) || 0),
-              tasks: toArray(s.tasks).map(normalizeTaskItem)
-            };
-          })
-        };
-      }
-      if (highestVal) {
-        store.highest = {
-          general: toArray(highestVal.general).map(normalizeQuestion),
-          sectors: toArray(highestVal.sectors).map(function(s) {
-            s = s || {};
-            return {
-              id: s.id || newSectorId(),
-              name: s.name || 'Сектор',
-              count: Math.max(0, parseInt(s.count, 10) || 0),
-              tasks: toArray(s.tasks).map(normalizeTaskItem)
-            };
-          })
-        };
-      }
-      if (titleVal) store.siteTitle = sanitizeText(String(titleVal), 200);
-      if (blocksVal) {
-        store.extraBlocks = toArray(blocksVal).map(function(b) {
-          if (!b || typeof b !== 'object') return null;
-          if (b.type === 'link') {
-            return { type: 'link', text: sanitizeText(b.text, 500), url: sanitizeUrl(b.url) };
-          }
-          return { type: 'text', value: sanitizeText(b.value, 5000) };
-        }).filter(Boolean);
-      }
-      if (updatedVal) lastCloudUpdatedAt = updatedVal;
-
-      cloudCache = store;
-      cloudSynced = true;
-      updateCustomCounts();
-      applyHomeSettings();
-      setSyncStatus('ok', 'Загружено: ' + countContent(store) + ' элементов');
-      console.log('RTDB parallel load OK', countContent(store));
-      return true;
-    })
-    .catch(function(e) {
-      cloudLoading = false;
-      console.error('RTDB load error', e);
-      if (!cloudCache) cloudCache = emptyStore();
-      cloudSynced = true;
-      setSyncStatus('err', 'Ошибка загрузки');
-      updateCustomCounts();
-      applyHomeSettings();
-      return false;
-    });
+    cloudCache = store;
+    cloudSynced = true;
+    cacheLocally(store);
+    updateCustomCounts();
+    applyHomeSettings();
+    setSyncStatus('ok', 'Загружено: ' + countContent(store));
+    return true;
+  }).catch(function(e) {
+    cloudLoading = false;
+    console.error(e);
+    if (!cloudCache) cloudCache = readLocalStore();
+    cloudSynced = true;
+    setSyncStatus('err', 'Ошибка загрузки');
+    return false;
+  });
 
   const timeout = new Promise(function(resolve) {
     setTimeout(function() {
       if (cloudLoading) {
         cloudLoading = false;
+        if (!cloudCache) cloudCache = readLocalStore();
         setSyncStatus(countContent(cloudCache) ? 'ok' : 'err', 'Таймаут');
         resolve(false);
       }
-    }, 8000);
+    }, 6000);
   });
   return Promise.race([loadPromise, timeout]);
 }
+function pullFromRealtime() { return pullFromCloud(); }
+function migrateFromRtdbIfNeeded() { return Promise.resolve(false); }
+
 function pullFromRealtime() { return pullFromCloud(); }
 function migrateFromRtdbIfNeeded() { return Promise.resolve(false); }
 
@@ -540,6 +560,7 @@ function pullCategory(levelKey) {
         };
         cloudCache[levelKey] = side;
         cloudSynced = true;
+        cacheLocally(cloudCache);
         updateCustomCounts();
         setSyncStatus('ok', 'Загружено');
         return side;
@@ -568,37 +589,30 @@ function ensureCategoryLoaded(level) {
 }
 
 function ensureDataLoaded(force) {
-  if (!cloudCache) cloudCache = emptyStore();
-
+  if (!cloudCache) {
+    const local = readLocalStore();
+    cloudCache = countContent(local) > 0 ? local : emptyStore();
+  }
   if (!firebaseReady || !window.firebase || !firebase.database) {
     cloudSynced = true;
     return Promise.resolve(JSON.parse(JSON.stringify(cloudCache)));
   }
-
-  // Уже в памяти сессии — сразу
-  if (!force && cloudSynced && countContent(cloudCache) > 0) {
-    return Promise.resolve(JSON.parse(JSON.stringify(cloudCache)));
-  }
-
-  if (!force) {
-    // не блокируем: фон
+  if (!force && countContent(cloudCache) > 0) {
     if (!cloudSynced) {
-      pullFromCloud().then(function() {
-        updateCustomCounts();
-        applyHomeSettings();
-      });
+      pullFromCloud(); // фон, без await
     }
     return Promise.resolve(JSON.parse(JSON.stringify(cloudCache)));
   }
-
+  if (!force) {
+    pullFromCloud();
+    return Promise.resolve(JSON.parse(JSON.stringify(cloudCache)));
+  }
   return pullFromCloud().then(function() {
-    if (!cloudCache) cloudCache = emptyStore();
-    return JSON.parse(JSON.stringify(cloudCache));
-  }).catch(function() {
-    if (!cloudCache) cloudCache = emptyStore();
-    return JSON.parse(JSON.stringify(cloudCache));
+    return JSON.parse(JSON.stringify(cloudCache || emptyStore()));
   });
 }
+
+
 
 
 
@@ -634,25 +648,29 @@ function syncLocalToCloudIfNeeded(snapshotBeforePull) {
 
 function listenCloud() {
   if (!firebaseReady || !window.firebase || !firebase.database) return;
-  firebase.database().ref(RTDB_PATH).off();
-  firebase.database().ref(RTDB_PATH).on('value', function(snap) {
+  const ref = firebase.database().ref(RTDB_PATH + '/updatedAt');
+  ref.off();
+  ref.on('value', function(snap) {
     if (cloudWriteInFlight) return;
-    const val = snap.val();
-    if (!val) return;
-    applyCloudData(val, true);
-  }, function(err) {
-    console.error('RTDB listen error', err);
-    setSyncStatus('err', 'Слушатель: ' + (err.message || err));
+    const ts = snap.val();
+    if (!ts) return;
+    if (lastCloudUpdatedAt && ts === lastCloudUpdatedAt) return;
+    // изменилось в облаке — подтянуть данные (с дебаунсом)
+    if (window._syncDebounce) clearTimeout(window._syncDebounce);
+    window._syncDebounce = setTimeout(function() {
+      lastCloudUpdatedAt = ts;
+      pullFromCloud();
+    }, 300);
   });
 }
 function listenRealtime() { listenCloud(); }
 
 function listenRealtime() { listenCloud(); }
 
+function listenRealtime() { listenCloud(); }
+
 function forceFullSync() {
-  setSyncStatus('syncing', 'Загрузка из Realtime Database…');
-  cloudCache = null;
-  cloudSynced = false;
+  setSyncStatus('syncing', 'Синхронизация…');
   return pullFromCloud().then(function() {
     updateCustomCounts();
     applyHomeSettings();
@@ -663,6 +681,7 @@ function forceFullSync() {
     setSyncStatus('err', 'Сбой синхронизации');
   });
 }
+
 
 
 
@@ -842,11 +861,12 @@ function updateCustomCounts() {
 function showPage(pageId) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.getElementById(pageId).classList.add('active');
+  const onHome = pageId === 'home-page';
   const profile = document.getElementById('profile-btn');
-  if (profile) {
-    profile.classList.toggle('hidden', pageId !== 'home-page');
-  }
-  if (pageId !== 'home-page') closeAuthPanel();
+  if (profile) profile.classList.toggle('hidden', !onHome);
+  const sync = document.getElementById('sync-status');
+  if (sync) sync.classList.toggle('hidden', !onHome);
+  if (!onHome) closeAuthPanel();
 }
 
 function goHome() {
@@ -2636,12 +2656,13 @@ function initFirebase() {
         });
       });
 
-    try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
-    if (!cloudCache) cloudCache = emptyStore();
+        if (!cloudCache || !countContent(cloudCache)) {
+      cloudCache = readLocalStore();
+    }
     updateCustomCounts();
     applyHomeSettings();
-    pullFromRealtime().then(function() {
-      listenRealtime();
+    pullFromCloud().then(function() {
+      listenCloud();
       updateCustomCounts();
       applyHomeSettings();
     });
@@ -2809,8 +2830,7 @@ function requireAdmin() {
 
 
 document.addEventListener('DOMContentLoaded', () => {
-  try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
-    if (!cloudCache) cloudCache = emptyStore();
+      if (!cloudCache) cloudCache = emptyStore();
   initFirebase();
   applyAdminUI();
   updateCustomCounts();

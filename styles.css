@@ -1967,6 +1967,9 @@ body:not(.is-admin) .extra-item textarea {
 .sync-status.ok {
   color: #16a34a;
 }
+.sync-status.hidden {
+  display: none !important;
+}
 .sync-status.err {
   color: #dc2626;
 }
