@@ -336,17 +336,17 @@ function pushToRealtime(data) {
 
 function applyCloudData(val, fromListen) {
   const form = document.getElementById('question-form');
-  if (fromListen && form && !form.classList.contains('hidden') && isAdmin()) {
-    // админ редактирует — не сбрасывать форму, но обновить кэш если пришли чужие данные
-    return;
+  const formOpen = form && !form.classList.contains('hidden');
+  if (fromListen && formOpen && isAdmin()) {
+    return; // не сбивать форму редактирования
   }
   if (fromListen && cloudWriteInFlight) return;
 
   if (!val) {
-    // пустой узел в облаке
-    if (!cloudCache) {
+    if (!fromListen) {
       cloudCache = emptyStore();
       cloudSynced = true;
+      cacheLocally(cloudCache);
       updateCustomCounts();
       applyHomeSettings();
     }
@@ -360,7 +360,7 @@ function applyCloudData(val, fromListen) {
   updateCustomCounts();
   applyHomeSettings();
   const manage = document.getElementById('manage-page');
-  if (manage && manage.classList.contains('active') && !(form && !form.classList.contains('hidden'))) {
+  if (manage && manage.classList.contains('active') && !formOpen) {
     renderQuestionsList();
   }
 }
@@ -1483,9 +1483,6 @@ function openManagePage(mode, level) {
   manageLevel = level === 'highest' ? 'highest' : 'first';
   editingId = null;
   activeSectorId = null;
-  pullFromRealtime().then(function() {
-    renderQuestionsList();
-  });
   const cat = manageLevel === 'highest' ? 'высшую категорию' : 'первую категорию';
   document.getElementById('manage-title').textContent =
     mode === 'general'
@@ -1500,15 +1497,27 @@ function openManagePage(mode, level) {
     if (tg) tg.classList.remove('hidden');
     if (tt) tt.classList.add('hidden');
     if (sectorsList) sectorsList.classList.add('hidden');
-    if (qList) qList.classList.remove('hidden');
+    if (qList) {
+      qList.classList.remove('hidden');
+      qList.innerHTML = '<div class="list-empty">Загрузка из Firebase…</div>';
+    }
   } else {
     if (tg) tg.classList.add('hidden');
     if (tt) tt.classList.remove('hidden');
-    if (sectorsList) sectorsList.classList.remove('hidden');
     if (qList) qList.classList.add('hidden');
+    if (sectorsList) {
+      sectorsList.classList.remove('hidden');
+      sectorsList.innerHTML = '<div class="list-empty">Загрузка из Firebase…</div>';
+    }
   }
-  renderQuestionsList();
   showPage('manage-page');
+  // всегда свежие данные из облака — одинаково на ПК и телефоне
+  ensureDataLoaded(true).then(function() {
+    renderQuestionsList();
+    updateCustomCounts();
+  }).catch(function() {
+    renderQuestionsList();
+  });
 }
 
 function startNewQuestion() {
@@ -2601,10 +2610,11 @@ function requireAdmin() {
 
 document.addEventListener('DOMContentLoaded', () => {
   initFirebase();
-  updateCustomCounts();
-  applyHomeSettings();
   applyAdminUI();
-  // восстановить прохождение после обновления страницы
+  ensureDataLoaded(true).then(function() {
+    updateCustomCounts();
+    applyHomeSettings();
+  });
   if (!restoreQuizProgress()) {
     showPage('home-page');
   }
