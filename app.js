@@ -230,6 +230,7 @@ function normalizeStore(data) {
 }
 
 let cloudSynced = false;
+let cloudWriteInFlight = false;
 
 function readLocalStore() {
   try {
@@ -252,41 +253,43 @@ function countContent(data) {
   return sideCount(data.first) + sideCount(data.highest);
 }
 
-function loadCustom() {
-  if (cloudCache) return JSON.parse(JSON.stringify(cloudCache));
-  // Пока ждём Firebase — показываем локальный кэш (на телефонах иначе пусто)
+function cacheLocally(data) {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      const data = normalizeStore(JSON.parse(raw));
-      // не помечаем cloudSynced — Firebase потом перезапишет
-      return JSON.parse(JSON.stringify(data));
-    }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
   } catch (e) {
-    console.error(e);
+    console.warn('localStorage', e);
   }
-  return emptyStore();
 }
 
+/** Всегда из памяти после синка; до синка — из local только как временный кэш */
+function loadCustom() {
+  if (cloudCache) return JSON.parse(JSON.stringify(cloudCache));
+  return JSON.parse(JSON.stringify(readLocalStore()));
+}
+
+/**
+ * Сохранение: сначала в Firebase (источник правды), потом локальный кэш.
+ * Без успешной записи в облако другие устройства данные не увидят.
+ */
 function saveCustom(data) {
   const normalized = normalizeStore(data);
   cloudCache = normalized;
   cloudSynced = true;
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
-  } catch (e) {
-    console.warn('localStorage full or blocked', e);
-  }
+  cacheLocally(normalized);
   updateCustomCounts();
-  // сразу в Firebase (один профиль данных для всех браузеров)
   scheduleCloudSave(normalized);
 }
 
 function scheduleCloudSave(data) {
   if (!firebaseReady || !window.firebase || !firebase.database) return;
   const user = firebase.auth().currentUser;
-  if (!user || user.uid !== ADMIN_UID) return;
+  if (!user || user.uid !== ADMIN_UID) {
+    console.warn('Сохранение только локально: нет сессии админа Firebase');
+    return;
+  }
   if (cloudSaveTimer) clearTimeout(cloudSaveTimer);
+  // сразу + повтор через 300мс на случай гонки
+  pushToRealtime(data);
   cloudSaveTimer = setTimeout(function() {
     pushToRealtime(data);
   }, 300);
@@ -301,162 +304,172 @@ function pushToRealtime(data) {
       }
       const user = firebase.auth().currentUser;
       if (!user || user.uid !== ADMIN_UID) {
-        console.warn('Отмена записи: нет прав Firebase Auth');
         resolve(false);
         return;
       }
       const payload = JSON.parse(JSON.stringify(data || cloudCache || emptyStore()));
       payload.updatedAt = new Date().toISOString();
       payload.updatedBy = user.uid;
+      cloudWriteInFlight = true;
       firebase.database().ref('content/main').set(payload)
         .then(function() {
-          console.log('Realtime DB: сохранено, элементов:', countContent(payload));
+          cloudWriteInFlight = false;
           cloudCache = normalizeStore(payload);
           cloudSynced = true;
-          try {
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(cloudCache));
-          } catch (e) {}
+          cacheLocally(cloudCache);
+          console.log('Firebase: сохранено, элементов:', countContent(cloudCache));
+          updateCustomCounts();
           resolve(true);
         })
         .catch(function(e) {
-          console.error('Realtime DB save error', e);
-          appAlert('Не удалось сохранить в Firebase. Проверьте Rules и сеть.\n' + (e.message || e));
+          cloudWriteInFlight = false;
+          console.error('Firebase save error', e);
+          appAlert('Не удалось сохранить в облако. Проверьте интернет и Rules Firebase.\n' + (e.message || e));
           reject(e);
         });
     } catch (e) {
-      console.error(e);
+      cloudWriteInFlight = false;
       reject(e);
     }
   });
 }
 
-/** После входа админа: если локально данных больше, чем в облаке — залить в Firebase */
-function syncLocalToCloudIfNeeded() {
-  if (!isAdmin()) return Promise.resolve();
-  const local = readLocalStore();
-  const cloud = cloudCache || emptyStore();
-  const localN = countContent(local);
-  const cloudN = countContent(cloud);
-  console.log('Синхронизация: локально', localN, 'в облаке', cloudN);
-  if (localN > cloudN) {
-    cloudCache = local;
-    cloudSynced = true;
-    return pushToRealtime(local).then(function() {
-      updateCustomCounts();
-      applyHomeSettings();
-      return true;
-    });
-  }
-  return Promise.resolve(false);
-}
-
 function applyCloudData(val, fromListen) {
-  // не сбрасывать форму редактирования живым listener'ом
   const form = document.getElementById('question-form');
   if (fromListen && form && !form.classList.contains('hidden') && isAdmin()) {
-    cloudCache = normalizeStore(val || emptyStore());
-    cloudSynced = true;
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(cloudCache));
-    } catch (e) {}
+    // админ редактирует — не сбрасывать форму, но обновить кэш если пришли чужие данные
     return;
   }
-  const data = normalizeStore(val || emptyStore());
+  if (fromListen && cloudWriteInFlight) return;
+
+  if (!val) {
+    // пустой узел в облаке
+    if (!cloudCache) {
+      cloudCache = emptyStore();
+      cloudSynced = true;
+      updateCustomCounts();
+      applyHomeSettings();
+    }
+    return;
+  }
+
+  const data = normalizeStore(val);
   cloudCache = data;
   cloudSynced = true;
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-  } catch (e) {}
+  cacheLocally(data);
   updateCustomCounts();
   applyHomeSettings();
   const manage = document.getElementById('manage-page');
-  if (manage && manage.classList.contains('active')) {
+  if (manage && manage.classList.contains('active') && !(form && !form.classList.contains('hidden'))) {
     renderQuestionsList();
   }
 }
 
 function pullFromRealtime() {
   if (!firebaseReady || !window.firebase || !firebase.database) {
-    // offline / no firebase — fallback to local once
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        cloudCache = normalizeStore(JSON.parse(raw));
-        cloudSynced = true;
-        updateCustomCounts();
-        applyHomeSettings();
-      } else {
-        cloudSynced = true;
-        cloudCache = emptyStore();
-      }
-    } catch (e) {
-      cloudSynced = true;
-      cloudCache = emptyStore();
-    }
-    return Promise.resolve(false);
+    cloudCache = readLocalStore();
+    cloudSynced = true;
+    updateCustomCounts();
+    applyHomeSettings();
+    return Promise.resolve(countContent(cloudCache) > 0);
   }
   cloudLoading = true;
+  try { firebase.database().goOnline(); } catch (e) {}
   return firebase.database().ref('content/main').once('value')
     .then(function(snap) {
       cloudLoading = false;
       const val = snap.val();
-      // Firebase — источник правды. Пустой узел = пустые данные, не заливаем localStorage.
-      applyCloudData(val);
-      return !!val;
+      if (val) {
+        applyCloudData(val, false);
+        console.log('Firebase: загружено', countContent(cloudCache));
+        return true;
+      }
+      cloudCache = cloudCache || emptyStore();
+      cloudSynced = true;
+      updateCustomCounts();
+      applyHomeSettings();
+      return false;
     })
     .catch(function(e) {
       cloudLoading = false;
-      console.error('Realtime DB load error', e);
-      // при ошибке сети — локальный кэш
-      try {
-        const raw = localStorage.getItem(STORAGE_KEY);
-        if (raw) {
-          cloudCache = normalizeStore(JSON.parse(raw));
-          cloudSynced = true;
-          updateCustomCounts();
-          applyHomeSettings();
-        } else {
-          cloudSynced = true;
-          cloudCache = emptyStore();
-        }
-      } catch (e2) {
-        cloudSynced = true;
-        cloudCache = emptyStore();
-      }
+      console.error('Firebase load error', e);
+      if (!cloudCache) cloudCache = readLocalStore();
+      cloudSynced = countContent(cloudCache) > 0;
+      updateCustomCounts();
+      applyHomeSettings();
       return false;
     });
 }
 
+/** Загрузка из облака — для всех устройств (ПК и телефон) */
 function ensureDataLoaded() {
-  // всегда быстро отдаём данные — кнопки не должны «зависать»
-  function fromLocal() {
-    const local = cloudCache || readLocalStore();
-    if (!cloudCache) cloudCache = local;
-    return local;
-  }
-  if (cloudSynced && cloudCache) {
+  if (cloudCache && cloudSynced && countContent(cloudCache) > 0) {
     return Promise.resolve(JSON.parse(JSON.stringify(cloudCache)));
   }
-  if (firebaseReady && window.firebase && firebase.database) {
-    try { firebase.database().goOnline(); } catch (e) {}
-    const timeout = new Promise(function(resolve) {
-      setTimeout(function() {
-        resolve(fromLocal());
-      }, 2500);
-    });
-    const pull = pullFromRealtime().then(function() {
-      return cloudCache || fromLocal();
-    }).catch(function() {
-      return fromLocal();
-    });
-    return Promise.race([pull, timeout]).then(function(data) {
-      cloudSynced = true;
-      if (data && !cloudCache) cloudCache = normalizeStore(data);
-      return cloudCache || fromLocal();
+  if (!firebaseReady || !window.firebase || !firebase.database) {
+    cloudCache = readLocalStore();
+    cloudSynced = true;
+    return Promise.resolve(JSON.parse(JSON.stringify(cloudCache)));
+  }
+  try { firebase.database().goOnline(); } catch (e) {}
+
+  function attempt(left) {
+    return pullFromRealtime().then(function() {
+      if (cloudCache && (cloudSynced || countContent(cloudCache) > 0)) {
+        return JSON.parse(JSON.stringify(cloudCache));
+      }
+      if (left <= 1) {
+        cloudSynced = true;
+        cloudCache = cloudCache || emptyStore();
+        return JSON.parse(JSON.stringify(cloudCache));
+      }
+      return new Promise(function(resolve) {
+        setTimeout(function() {
+          resolve(attempt(left - 1));
+        }, 1000);
+      });
     });
   }
-  cloudSynced = true;
-  return Promise.resolve(fromLocal());
+  return attempt(6);
+}
+
+function mergeStores(a, b) {
+  a = normalizeStore(a || emptyStore());
+  b = normalizeStore(b || emptyStore());
+  const out = emptyStore();
+  out.siteTitle = a.siteTitle || b.siteTitle;
+  out.extraBlocks = (a.extraBlocks && a.extraBlocks.length >= (b.extraBlocks || []).length)
+    ? a.extraBlocks : (b.extraBlocks || []);
+  ['first', 'highest'].forEach(function(side) {
+    const ag = (a[side].general || []).length;
+    const bg = (b[side].general || []).length;
+    const as = (a[side].sectors || []).reduce(function(s, sec) { return s + (sec.tasks || []).length; }, 0);
+    const bs = (b[side].sectors || []).reduce(function(s, sec) { return s + (sec.tasks || []).length; }, 0);
+    out[side] = {
+      general: ag >= bg ? a[side].general : b[side].general,
+      sectors: as >= bs ? a[side].sectors : b[side].sectors
+    };
+  });
+  return out;
+}
+
+/** Один раз: залить с ПК более полные данные в облако после входа админа */
+function syncLocalToCloudIfNeeded(snapshotBeforePull) {
+  if (!isAdmin()) return Promise.resolve(false);
+  const local = snapshotBeforePull || readLocalStore();
+  const cloud = cloudCache || emptyStore();
+  const merged = mergeStores(local, cloud);
+  if (countContent(merged) > countContent(cloud)) {
+    cloudCache = merged;
+    cloudSynced = true;
+    cacheLocally(merged);
+    return pushToRealtime(merged).then(function() {
+      updateCustomCounts();
+      applyHomeSettings();
+      return true;
+    });
+  }
+  return Promise.resolve(false);
 }
 
 function listenRealtime() {
@@ -2388,8 +2401,10 @@ function initFirebase() {
           if (user && user.uid === ADMIN_UID) {
             adminUser = user;
             applyAdminUI();
+            // сохранить локальные данные ДО pull (иначе 52 затрутся 20 из облака)
+            const localBefore = readLocalStore();
             ensureDataLoaded().then(function() {
-              return syncLocalToCloudIfNeeded();
+              return syncLocalToCloudIfNeeded(localBefore);
             }).then(function() {
               updateCustomCounts();
               applyHomeSettings();
@@ -2535,8 +2550,9 @@ function tryAdminLogin() {
       }
       adminUser = cred.user;
       applyAdminUI();
+      const localBefore = readLocalStore();
       return ensureDataLoaded().then(function() {
-        return syncLocalToCloudIfNeeded();
+        return syncLocalToCloudIfNeeded(localBefore);
       }).then(function() {
         updateCustomCounts();
         applyHomeSettings();
