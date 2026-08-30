@@ -2,6 +2,8 @@
 
 
 const STORAGE_KEY = 'teacher-trainer-custom-v3';
+const COUNTS_KEY = 'teacher-trainer-counts-v1';
+
 
 // —— Безопасность ——
 function isSafeHttpUrl(url) {
@@ -328,7 +330,27 @@ function cacheLocally(data) {
   } catch (e) {
     console.warn('localStorage', e);
   }
+  try {
+    const c = {
+      firstG: (data.first && data.first.general || []).length,
+      firstT: (data.first && data.first.sectors || []).reduce(function(s, sec) { return s + (sec.tasks || []).length; }, 0),
+      highestG: (data.highest && data.highest.general || []).length,
+      highestT: (data.highest && data.highest.sectors || []).reduce(function(s, sec) { return s + (sec.tasks || []).length; }, 0),
+      siteTitle: data.siteTitle || '',
+      updatedAt: data.updatedAt || null
+    };
+    localStorage.setItem(COUNTS_KEY, JSON.stringify(c));
+  } catch (e) {}
 }
+
+function readCountsFast() {
+  try {
+    const raw = localStorage.getItem(COUNTS_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch (e) {}
+  return null;
+}
+
 
 
 
@@ -689,9 +711,18 @@ function ensureCategoryLoaded(level) {
     (side.general && side.general.length) ||
     (side.sectors && side.sectors.length)
   );
-  const isFresh = hasContent && lastCloudUpdatedAt && categoryFreshness[lk] === lastCloudUpdatedAt;
-  if (isFresh) {
+  // есть в кэше — отдаём сразу, не ждём сеть (Chrome/Firefox/Safari)
+  if (hasContent) {
+    if (firebaseReady && lastCloudUpdatedAt && categoryFreshness[lk] !== lastCloudUpdatedAt) {
+      pullCategory(lk); // фон
+    }
     return Promise.resolve(side);
+  }
+  if (!firebaseReady) {
+    return loadFirebaseSdk().then(function() {
+      if (!firebaseReady) initFirebase();
+      return pullCategory(lk);
+    });
   }
   return pullCategory(lk);
 }
@@ -929,17 +960,28 @@ function renderExtraBlocks() {
 }
 
 function updateCustomCounts() {
-  const data = loadCustom();
-  const set = (id, n, label) => {
+  const set = function(id, n, label) {
     const el = document.getElementById(id);
-    if (el) el.textContent = n > 0 ? `${label}: ${n}` : '';
+    if (el) el.textContent = n > 0 ? (label + ': ' + n) : '';
   };
+  // если полный кэш ещё не разобран — берём лёгкие счётчики
+  if (!cloudCache || !countContent(cloudCache)) {
+    const c = readCountsFast();
+    if (c) {
+      set('count-general-first', c.firstG || 0, 'Ваших');
+      set('count-tasks-first', c.firstT || 0, 'Ваших');
+      set('count-general-highest', c.highestG || 0, 'Ваших');
+      set('count-tasks-highest', c.highestT || 0, 'Ваших');
+      return;
+    }
+  }
+  const data = loadCustom();
   function taskCount(side) {
     return (side.sectors || []).reduce(function(s, sec) { return s + (sec.tasks || []).length; }, 0);
   }
-  set('count-general-first', data.first.general.length, 'Ваших');
+  set('count-general-first', (data.first.general || []).length, 'Ваших');
   set('count-tasks-first', taskCount(data.first), 'Ваших');
-  set('count-general-highest', data.highest.general.length, 'Ваших');
+  set('count-general-highest', (data.highest.general || []).length, 'Ваших');
   set('count-tasks-highest', taskCount(data.highest), 'Ваших');
 }
 
@@ -2693,6 +2735,40 @@ function escapeAttr(s) {
 
 // —— init ——
 
+
+function loadFirebaseSdk() {
+  return new Promise(function(resolve, reject) {
+    if (window.firebase && window.firebase.database) {
+      resolve();
+      return;
+    }
+    const urls = [
+      'https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js',
+      'https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js',
+      'https://www.gstatic.com/firebasejs/10.14.1/firebase-database-compat.js'
+    ];
+    function next(i) {
+      if (i >= urls.length) { resolve(); return; }
+      const s = document.createElement('script');
+      s.src = urls[i];
+      s.async = true;
+      s.onload = function() { next(i + 1); };
+      s.onerror = function() { reject(new Error('Не удалось загрузить Firebase SDK')); };
+      document.head.appendChild(s);
+    }
+    next(0);
+  });
+}
+
+function bootFirebase() {
+  loadFirebaseSdk()
+    .then(function() { initFirebase(); })
+    .catch(function(e) {
+      console.error(e);
+      setSyncStatus('err', 'SDK не загрузился');
+    });
+}
+
 // —— Админ (Firebase Auth) ——
 const ADMIN_UID = (typeof window !== 'undefined' && window.ADMIN_UID) || 'tJqSbhZjNzL5Bm0vi7Umy8Kn3Vc2';
 let firebaseReady = false;
@@ -2848,7 +2924,8 @@ function tryAdminLogin() {
     return;
   }
   if (!window.firebase || !firebase.auth) {
-    setAuthError('Firebase не загружен. Обновите страницу.');
+    setAuthError('Загрузка Firebase… Повторите через секунду.');
+    bootFirebase();
     return;
   }
   if (!firebaseReady) {
@@ -2922,13 +2999,25 @@ function requireAdmin() {
 
 
 document.addEventListener('DOMContentLoaded', () => {
-      if (!cloudCache) cloudCache = emptyStore();
-  initFirebase();
+  // 1) Мгновенно из кэша (без ожидания Firebase) — одинаково во всех браузерах
+  try {
+    cloudCache = readLocalStore();
+  } catch (e) {
+    cloudCache = emptyStore();
+  }
+  if (cloudCache && cloudCache.updatedAt) lastCloudUpdatedAt = cloudCache.updatedAt;
   applyAdminUI();
   updateCustomCounts();
   applyHomeSettings();
+  setSyncStatus(countContent(cloudCache) ? 'ok' : 'syncing', countContent(cloudCache) ? 'Из кэша' : 'Ожидание…');
   if (!restoreQuizProgress()) {
     showPage('home-page');
+  }
+  // 2) Firebase после отрисовки (requestIdleCallback / setTimeout)
+  if (window.requestIdleCallback) {
+    requestIdleCallback(function() { bootFirebase(); }, { timeout: 1200 });
+  } else {
+    setTimeout(bootFirebase, 50);
   }
   document.addEventListener('paste', handleClipboardPaste);
   const syncEl = document.getElementById('sync-status');
