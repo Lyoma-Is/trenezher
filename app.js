@@ -1232,41 +1232,37 @@ function _startInformaticsQuizBody(level) {
     });
   }
 
-  const numbered = [];
+  // Чередуются ТОЛЬКО Задание 19, 20, 21.
+  // Остальные: Задание 1, Задание 1, Задание 2, Задание 2… (по count сектора, по порядку номеров).
+  const LINKED_NUMS = { 19: 1, 20: 1, 21: 1 };
   const plain = [];
+  const linkedByNum = {};
+
   sectors.forEach(function(sec) {
     const num = parseZadanieNum(sec.name);
-    if (num != null) numbered.push({ sec: sec, num: num });
-    else plain.push(sec);
-  });
-  numbered.sort(function(a, b) { return a.num - b.num; });
-
-  // группы подряд идущих номеров: (19,20,21), отдельно (25), отдельно (1,2)…
-  // Связанные группы (19–20–21) идут В КОНЦЕ списка, остальные секторы — раньше.
-  let run = [];
-  const linkedGroups = [];
-  function flushRun() {
-    if (run.length >= 2) {
-      linkedGroups.push(run.map(function(x) { return x.sec; }));
-    } else if (run.length === 1) {
-      plain.push(run[0].sec);
-    }
-    run = [];
-  }
-  for (let i = 0; i < numbered.length; i++) {
-    if (!run.length || numbered[i].num === run[run.length - 1].num + 1) {
-      run.push(numbered[i]);
+    if (num != null && LINKED_NUMS[num]) {
+      linkedByNum[num] = sec;
     } else {
-      flushRun();
-      run.push(numbered[i]);
+      plain.push({ sec: sec, num: num });
     }
-  }
-  flushRun();
+  });
 
-  // сначала обычные секторы
-  plain.forEach(pickPlain);
-  // затем связанные «Задание 19, 20, 21» — в конце
-  linkedGroups.forEach(pickLinkedGroup);
+  // обычные секторы по возрастанию номера; без номера — в конце
+  plain.sort(function(a, b) {
+    if (a.num == null && b.num == null) return String(a.sec.name || '').localeCompare(String(b.sec.name || ''), 'ru');
+    if (a.num == null) return 1;
+    if (b.num == null) return -1;
+    return a.num - b.num;
+  });
+  plain.forEach(function(x) { pickPlain(x.sec); });
+
+  // 19 → 20 → 21 → 19 → 20 → 21 … в конце
+  const linkedGroup = [19, 20, 21].map(function(n) { return linkedByNum[n]; }).filter(Boolean);
+  if (linkedGroup.length >= 2) {
+    pickLinkedGroup(linkedGroup);
+  } else {
+    linkedGroup.forEach(pickPlain);
+  }
 
   if (!t.length) {
     appAlert('Задания не добавлены');
