@@ -1984,3 +1984,11 @@ body:not(.is-admin) .extra-item textarea {
     height: 36px;
   }
 }
+
+
+.cat-counts {
+  font-weight: 600;
+  font-size: 0.9em;
+  color: var(--text-muted);
+  white-space: nowrap;
+}

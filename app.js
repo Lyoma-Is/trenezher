@@ -964,6 +964,12 @@ function updateCustomCounts() {
     const el = document.getElementById(id);
     if (el) el.textContent = n > 0 ? (label + ': ' + n) : '';
   };
+  function setCat(id, q, t) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    // (вопросы, задания) — показываем всегда, даже если 0
+    el.textContent = '(' + q + ', ' + t + ')';
+  }
   // если полный кэш ещё не разобран — берём лёгкие счётчики
   if (!cloudCache || !countContent(cloudCache)) {
     const c = readCountsFast();
@@ -972,6 +978,8 @@ function updateCustomCounts() {
       set('count-tasks-first', c.firstT || 0, 'Ваших');
       set('count-general-highest', c.highestG || 0, 'Ваших');
       set('count-tasks-highest', c.highestT || 0, 'Ваших');
+      setCat('cat-counts-first', c.firstG || 0, c.firstT || 0);
+      setCat('cat-counts-highest', c.highestG || 0, c.highestT || 0);
       return;
     }
   }
@@ -979,10 +987,16 @@ function updateCustomCounts() {
   function taskCount(side) {
     return (side.sectors || []).reduce(function(s, sec) { return s + (sec.tasks || []).length; }, 0);
   }
-  set('count-general-first', (data.first.general || []).length, 'Ваших');
-  set('count-tasks-first', taskCount(data.first), 'Ваших');
-  set('count-general-highest', (data.highest.general || []).length, 'Ваших');
-  set('count-tasks-highest', taskCount(data.highest), 'Ваших');
+  const fg = (data.first.general || []).length;
+  const ft = taskCount(data.first);
+  const hg = (data.highest.general || []).length;
+  const ht = taskCount(data.highest);
+  set('count-general-first', fg, 'Ваших');
+  set('count-tasks-first', ft, 'Ваших');
+  set('count-general-highest', hg, 'Ваших');
+  set('count-tasks-highest', ht, 'Ваших');
+  setCat('cat-counts-first', fg, ft);
+  setCat('cat-counts-highest', hg, ht);
 }
 
 // —— Навигация ——
