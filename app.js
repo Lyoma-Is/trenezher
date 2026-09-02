@@ -2238,7 +2238,36 @@ function addOptionField(text, checked) {
     '<input type="text" class="form-input option-text" placeholder="Вариант ответа" value="' + safe + '">' +
     '<button type="button" class="btn-remove" onclick="removeOptionField(this)" title="Удалить">×</button>';
   container.appendChild(row);
+  const input = row.querySelector('.option-text');
+  if (input) input.addEventListener('paste', onOptionPaste);
 }
+
+/** Вставка нескольких строк → каждый вариант в своё поле */
+function onOptionPaste(e) {
+  const text = (e.clipboardData || window.clipboardData).getData('text');
+  if (!text) return;
+  const lines = text.split(/\r\n|\n|\r/).map(function(s) { return s.trim(); }).filter(function(s) { return s.length > 0; });
+  if (lines.length < 2) return;
+
+  e.preventDefault();
+  const input = e.target;
+  const row = input.closest('.option-field');
+  const container = document.getElementById('options-fields');
+  if (!container || !row) return;
+
+  input.value = lines[0];
+
+  let insertAfter = row;
+  for (let i = 1; i < lines.length; i++) {
+    addOptionField(lines[i], false);
+    const newRow = container.lastElementChild;
+    if (newRow && insertAfter && insertAfter.nextSibling) {
+      container.insertBefore(newRow, insertAfter.nextSibling);
+    }
+    insertAfter = newRow;
+  }
+}
+
 
 function removeOptionField(btn) {
   const container = document.getElementById('options-fields');
