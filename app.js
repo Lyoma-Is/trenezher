@@ -325,22 +325,25 @@ function countContent(data) {
 }
 
 function cacheLocally(data) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-  } catch (e) {
-    console.warn('localStorage', e);
-  }
-  try {
-    const c = {
-      firstG: (data.first && data.first.general || []).length,
-      firstT: (data.first && data.first.sectors || []).reduce(function(s, sec) { return s + (sec.tasks || []).length; }, 0),
-      highestG: (data.highest && data.highest.general || []).length,
-      highestT: (data.highest && data.highest.sectors || []).reduce(function(s, sec) { return s + (sec.tasks || []).length; }, 0),
-      siteTitle: data.siteTitle || '',
-      updatedAt: data.updatedAt || null
-    };
-    localStorage.setItem(COUNTS_KEY, JSON.stringify(c));
-  } catch (e) {}
+  if (window._cacheLocalTimer) clearTimeout(window._cacheLocalTimer);
+  window._cacheLocalTimer = setTimeout(function() {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    } catch (e) {
+      console.warn('localStorage', e);
+    }
+    try {
+      const c = {
+        firstG: (data.first && data.first.general || []).length,
+        firstT: (data.first && data.first.sectors || []).reduce(function(s, sec) { return s + (sec.tasks || []).length; }, 0),
+        highestG: (data.highest && data.highest.general || []).length,
+        highestT: (data.highest && data.highest.sectors || []).reduce(function(s, sec) { return s + (sec.tasks || []).length; }, 0),
+        siteTitle: data.siteTitle || '',
+        updatedAt: data.updatedAt || null
+      };
+      localStorage.setItem(COUNTS_KEY, JSON.stringify(c));
+    } catch (e) {}
+  }, 100);
 }
 
 function readCountsFast() {
@@ -350,6 +353,9 @@ function readCountsFast() {
   } catch (e) {}
   return null;
 }
+
+
+
 
 
 
@@ -652,80 +658,100 @@ function refreshLoadedCategories() {
 /** Загрузка из облака — для всех устройств (ПК и телефон) */
 
 /** Быстрая загрузка одной категории (first|highest) без всего документа */
-function pullCategory(levelKey) {
+function pullCategory(levelKey, parts) {
   levelKey = levelKey === 'highest' ? 'highest' : 'first';
+  parts = parts || ['general', 'sectors'];
   if (!firebaseReady || !window.firebase || !firebase.database) {
-    return Promise.resolve(null);
+    return Promise.resolve(cloudCache && cloudCache[levelKey]);
   }
+  if (!cloudCache) cloudCache = readLocalStore() || emptyStore();
+  if (!cloudCache[levelKey]) cloudCache[levelKey] = { general: [], sectors: [] };
+
   setSyncStatus('syncing', 'Загрузка…');
-  return Promise.all([
-    firebase.database().ref(RTDB_PATH + '/' + levelKey).once('value'),
-    firebase.database().ref(RTDB_PATH + '/updatedAt').once('value')
-  ])
-    .then(function(results) {
-      const val = results[0].val();
-      const updatedVal = results[1].val();
-      if (!cloudCache) cloudCache = emptyStore();
-      if (updatedVal) lastCloudUpdatedAt = updatedVal;
-      categoryFreshness[levelKey] = updatedVal || null;
-      if (val) {
-        const side = {
-          general: toArray(val.general).map(normalizeQuestion),
-          sectors: toArray(val.sectors).map(function(s) {
-            s = s || {};
-            return {
-              id: s.id || newSectorId(),
-              name: s.name || 'Сектор',
-              count: Math.max(0, parseInt(s.count, 10) || 0),
-              tasks: toArray(s.tasks).map(normalizeTaskItem)
-            };
-          })
+  const db = firebase.database();
+  const base = RTDB_PATH + '/' + levelKey;
+  const jobs = [];
+
+  if (parts.indexOf('general') >= 0) {
+    jobs.push(db.ref(base + '/general').once('value').then(function(snap) {
+      cloudCache[levelKey].general = toArray(snap.val()).map(normalizeQuestion);
+    }));
+  }
+  if (parts.indexOf('sectors') >= 0) {
+    jobs.push(db.ref(base + '/sectors').once('value').then(function(snap) {
+      cloudCache[levelKey].sectors = toArray(snap.val()).map(function(s) {
+        s = s || {};
+        return {
+          id: s.id || newSectorId(),
+          name: s.name || 'Сектор',
+          count: Math.max(0, parseInt(s.count, 10) || 0),
+          tasks: toArray(s.tasks).map(normalizeTaskItem)
         };
-        cloudCache[levelKey] = side;
-        cloudSynced = true;
-        cacheLocally(cloudCache);
-        updateCustomCounts();
-        setSyncStatus('ok', 'Загружено');
-        return side;
-      }
-      cloudCache[levelKey] = { general: [], sectors: [] };
-      cloudSynced = true;
-      updateCustomCounts();
-      setSyncStatus('ok', 'Пусто');
-      return cloudCache[levelKey];
-    })
-    .catch(function(e) {
-      console.error(e);
-      setSyncStatus('err', 'Ошибка загрузки');
-      return null;
-    });
+      });
+    }));
+  }
+  jobs.push(db.ref(RTDB_PATH + '/updatedAt').once('value').then(function(snap) {
+    const u = snap.val();
+    if (u) lastCloudUpdatedAt = u;
+    categoryFreshness[levelKey] = u || null;
+    cloudCache.updatedAt = u || null;
+  }));
+
+  return Promise.all(jobs).then(function() {
+    cloudSynced = true;
+    cacheLocally(cloudCache);
+    updateCustomCounts();
+    setSyncStatus('ok', 'Готово');
+    return cloudCache[levelKey];
+  }).catch(function(e) {
+    console.error(e);
+    setSyncStatus('err', 'Ошибка загрузки');
+    return cloudCache[levelKey];
+  });
 }
+
 
 /** Загружает уровень, только если он ещё не подтягивался в этой сессии
  * или устарел (сервер сообщил новый updatedAt после последней синхронизации
  * этого уровня) — иначе просто отдаёт то, что уже в памяти. */
-function ensureCategoryLoaded(level) {
+function ensureCategoryLoaded(level, parts) {
   const lk = level === 'highest' ? 'highest' : 'first';
-  const side = cloudCache && cloudCache[lk];
-  const hasContent = side && (
-    (side.general && side.general.length) ||
-    (side.sectors && side.sectors.length)
-  );
-  // есть в кэше — отдаём сразу, не ждём сеть (Chrome/Firefox/Safari)
-  if (hasContent) {
+  parts = parts || ['general', 'sectors'];
+  if (!cloudCache) cloudCache = readLocalStore() || emptyStore();
+  const side = cloudCache[lk] || { general: [], sectors: [] };
+
+  const needG = parts.indexOf('general') >= 0;
+  const needS = parts.indexOf('sectors') >= 0;
+  const hasG = !needG || (side.general && side.general.length > 0);
+  const hasS = !needS || (side.sectors && side.sectors.length > 0);
+
+  // кэш есть — сразу, сеть только в фоне если устарело
+  if (hasG && hasS) {
     if (firebaseReady && lastCloudUpdatedAt && categoryFreshness[lk] !== lastCloudUpdatedAt) {
-      pullCategory(lk); // фон
+      pullCategory(lk, parts);
     }
     return Promise.resolve(side);
   }
+
+  const doPull = function() {
+    return pullCategory(lk, parts);
+  };
   if (!firebaseReady) {
     return loadFirebaseSdk().then(function() {
       if (!firebaseReady) initFirebase();
-      return pullCategory(lk);
+      // подождать готовность database
+      return new Promise(function(resolve) {
+        var n = 0;
+        (function wait() {
+          if (firebaseReady || n > 40) resolve(doPull());
+          else { n++; setTimeout(wait, 50); }
+        })();
+      });
     });
   }
-  return pullCategory(lk);
+  return doPull();
 }
+
 
 function ensureDataLoaded(force) {
   if (!cloudCache) {
@@ -1113,7 +1139,7 @@ function tablesEqual(a, b) {
 
 function startGeneralQuiz(level) {
   const levelKey = level === 'highest' ? 'highest' : 'first';
-  ensureCategoryLoaded(level).then(function() {
+  ensureCategoryLoaded(level, ['general']).then(function() {
     const inputId = level === 'first' ? 'count-first' : 'count-highest';
     const maxAllowed = level === 'first' ? 300 : 600;
     let count = parseInt(document.getElementById(inputId).value, 10);
@@ -1161,7 +1187,7 @@ function startGeneralQuiz(level) {
 }
 
 function startInformaticsQuiz(level) {
-  ensureCategoryLoaded(level).then(function() {
+  ensureCategoryLoaded(level, ['general', 'sectors']).then(function() {
     _startInformaticsQuizBody(level);
   }).catch(function(e) {
     console.error(e);
@@ -2781,23 +2807,38 @@ function loadFirebaseSdk() {
       resolve();
       return;
     }
+    if (window._fbSdkLoading) {
+      window._fbSdkLoading.then(resolve, reject);
+      return;
+    }
     const urls = [
       'https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js',
       'https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js',
       'https://www.gstatic.com/firebasejs/10.14.1/firebase-database-compat.js'
     ];
-    function next(i) {
-      if (i >= urls.length) { resolve(); return; }
-      const s = document.createElement('script');
-      s.src = urls[i];
-      s.async = true;
-      s.onload = function() { next(i + 1); };
-      s.onerror = function() { reject(new Error('Не удалось загрузить Firebase SDK')); };
-      document.head.appendChild(s);
-    }
-    next(0);
+    // app обязателен первым, auth+database параллельно
+    window._fbSdkLoading = new Promise(function(res, rej) {
+      function loadScript(url) {
+        return new Promise(function(r, j) {
+          const s = document.createElement('script');
+          s.src = url;
+          s.async = true;
+          s.onload = function() { r(); };
+          s.onerror = function() { j(new Error('SDK: ' + url)); };
+          document.head.appendChild(s);
+        });
+      }
+      loadScript(urls[0])
+        .then(function() {
+          return Promise.all([loadScript(urls[1]), loadScript(urls[2])]);
+        })
+        .then(function() { res(); })
+        .catch(rej);
+    });
+    window._fbSdkLoading.then(resolve, reject);
   });
 }
+
 
 function bootFirebase() {
   loadFirebaseSdk()
@@ -2844,11 +2885,9 @@ function initFirebase() {
             adminUser = user;
             applyAdminUI();
             // сохранить локальные данные ДО pull (иначе 52 затрутся 20 из облака)
-            ensureDataLoaded(true).then(function() {
+            pullMetaFromCloud().then(function() {
               updateCustomCounts();
               applyHomeSettings();
-              const manage = document.getElementById('manage-page');
-              if (manage && manage.classList.contains('active')) renderQuestionsList();
             });
           } else if (user && user.uid !== ADMIN_UID) {
             adminUser = null;
@@ -3053,11 +3092,7 @@ document.addEventListener('DOMContentLoaded', () => {
     showPage('home-page');
   }
   // 2) Firebase после отрисовки (requestIdleCallback / setTimeout)
-  if (window.requestIdleCallback) {
-    requestIdleCallback(function() { bootFirebase(); }, { timeout: 1200 });
-  } else {
-    setTimeout(bootFirebase, 50);
-  }
+  setTimeout(bootFirebase, 0);
   document.addEventListener('paste', handleClipboardPaste);
   const syncEl = document.getElementById('sync-status');
   if (syncEl) syncEl.addEventListener('click', function() { forceFullSync(); });
