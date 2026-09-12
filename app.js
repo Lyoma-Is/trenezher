@@ -290,17 +290,11 @@ function restGetWithTimeout(path, ms) {
 
 /** SDK once, при неудаче — REST */
 function loadPath(path, ms) {
-  ms = ms || 20000;
-  if (firebaseReady && window.firebase && firebase.database) {
-    return onceWithTimeout(firebase.database().ref(path), Math.min(ms, 12000))
-      .then(function(snap) { return snap.val(); })
-      .catch(function(err) {
-        console.warn('SDK fail, REST:', path, err && err.message);
-        return restGetWithTimeout(path, ms);
-      });
-  }
+  // Чтение сразу через REST — без 12с ожидания WebSocket SDK
+  ms = ms || 60000;
   return restGetWithTimeout(path, ms);
 }
+
 
 
 
@@ -919,22 +913,37 @@ function syncLocalToCloudIfNeeded(snapshotBeforePull) {
 
 
 function listenCloud() {
+  // Live-listener только если SDK реально на связи; иначе REST при открытии/синхронизации
   if (!firebaseReady || !window.firebase || !firebase.database) return;
-  const ref = firebase.database().ref(RTDB_PATH + '/updatedAt');
-  ref.off();
-  ref.on('value', function(snap) {
-    if (cloudWriteInFlight) return;
-    const ts = snap.val();
-    if (!ts) return;
-    if (lastCloudUpdatedAt && ts === lastCloudUpdatedAt) return;
-    // изменилось в облаке — подтянуть только метаданные и уже загруженные
-    // категории (а не весь документ целиком), с дебаунсом
-    if (window._syncDebounce) clearTimeout(window._syncDebounce);
-    window._syncDebounce = setTimeout(function() {
-      pullMetaFromCloud().then(refreshLoadedCategories);
-    }, 300);
-  });
+  try {
+    var ref = firebase.database().ref(RTDB_PATH + '/updatedAt');
+    ref.off();
+    ref.on('value', function(snap) {
+      if (cloudWriteInFlight) return;
+      var ts = snap.val();
+      if (!ts) return;
+      if (lastCloudUpdatedAt && ts === lastCloudUpdatedAt) return;
+      if (window._syncDebounce) clearTimeout(window._syncDebounce);
+      window._syncDebounce = setTimeout(function() {
+        lastCloudUpdatedAt = ts;
+        // лёгкое обновление через REST
+        Promise.all([
+          pullCategory('first', ['general', 'sectors']),
+          pullCategory('highest', ['general', 'sectors'])
+        ]).then(function() {
+          updateCustomCounts();
+          applyHomeSettings();
+        });
+      }, 500);
+    }, function(err) {
+      console.warn('listenCloud off', err && err.message);
+    });
+  } catch (e) {
+    console.warn('listenCloud', e);
+  }
 }
+function listenRealtime() { listenCloud(); }
+
 function listenRealtime() { listenCloud(); }
 
 function forceFullSync() {
