@@ -249,6 +249,61 @@ function waitForFirebase(maxMs) {
   });
 }
 
+function getDatabaseUrl() {
+  var cfg = window.FIREBASE_CONFIG || {};
+  var url = (cfg.databaseURL || 'https://trenezher-default-rtdb.firebaseio.com').replace(/\/$/, '');
+  return url;
+}
+
+/** Чтение через REST API (работает без WebSocket, быстрее при блокировках) */
+function restGet(path) {
+  var url = getDatabaseUrl() + '/' + String(path || '').replace(/^\/+/, '') + '.json';
+  return fetch(url, { method: 'GET', cache: 'no-store' })
+    .then(function(res) {
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      return res.json();
+    });
+}
+
+function restGetWithTimeout(path, ms) {
+  ms = ms || 30000;
+  return new Promise(function(resolve, reject) {
+    var done = false;
+    var t = setTimeout(function() {
+      if (done) return;
+      done = true;
+      reject(new Error('REST таймаут ' + Math.round(ms / 1000) + 'с'));
+    }, ms);
+    restGet(path).then(function(data) {
+      if (done) return;
+      done = true;
+      clearTimeout(t);
+      resolve(data);
+    }).catch(function(e) {
+      if (done) return;
+      done = true;
+      clearTimeout(t);
+      reject(e);
+    });
+  });
+}
+
+/** SDK once, при неудаче — REST */
+function loadPath(path, ms) {
+  ms = ms || 20000;
+  if (firebaseReady && window.firebase && firebase.database) {
+    return onceWithTimeout(firebase.database().ref(path), Math.min(ms, 12000))
+      .then(function(snap) { return snap.val(); })
+      .catch(function(err) {
+        console.warn('SDK fail, REST:', path, err && err.message);
+        return restGetWithTimeout(path, ms);
+      });
+  }
+  return restGetWithTimeout(path, ms);
+}
+
+
+
 
 // updatedAt сервера, на который были синхронизированы данные каждого уровня —
 // позволяет не перекачивать уровень повторно, если он уже актуален
@@ -554,21 +609,16 @@ function applyCloudData(val, fromListen) {
 
 function pullFromCloud() {
   if (cloudLoading && window._pullInFlight) return window._pullInFlight;
+  cloudLoading = true;
+  setSyncStatus('syncing', 'Загрузка…');
 
-  window._pullInFlight = waitForFirebase(15000).then(function() {
-    cloudLoading = true;
-    setSyncStatus('syncing', 'Загрузка…');
-    try { firebase.database().goOnline(); } catch (e) {}
-    var db = firebase.database();
-    var base = RTDB_PATH;
-    return Promise.all([
-      onceWithTimeout(db.ref(base + '/first'), 30000),
-      onceWithTimeout(db.ref(base + '/highest'), 30000),
-      onceWithTimeout(db.ref(base + '/siteTitle'), 10000),
-      onceWithTimeout(db.ref(base + '/extraBlocks'), 10000),
-      onceWithTimeout(db.ref(base + '/updatedAt'), 10000)
-    ]);
-  }).then(function(results) {
+  window._pullInFlight = Promise.all([
+    loadPath(RTDB_PATH + '/first', 90000),
+    loadPath(RTDB_PATH + '/highest', 90000),
+    loadPath(RTDB_PATH + '/siteTitle', 20000),
+    loadPath(RTDB_PATH + '/extraBlocks', 20000),
+    loadPath(RTDB_PATH + '/updatedAt', 20000)
+  ]).then(function(results) {
     cloudLoading = false;
     window._pullInFlight = null;
     function mapSide(val) {
@@ -587,14 +637,11 @@ function pullFromCloud() {
       };
     }
     var store = emptyStore();
-    store.first = mapSide(results[0].val());
-    store.highest = mapSide(results[1].val());
-    var titleVal = results[2].val();
-    var blocksVal = results[3].val();
-    var updatedVal = results[4].val();
-    if (titleVal) store.siteTitle = sanitizeText(String(titleVal), 200);
-    if (blocksVal) {
-      store.extraBlocks = toArray(blocksVal).map(function(b) {
+    store.first = mapSide(results[0]);
+    store.highest = mapSide(results[1]);
+    if (results[2]) store.siteTitle = sanitizeText(String(results[2]), 200);
+    if (results[3]) {
+      store.extraBlocks = toArray(results[3]).map(function(b) {
         if (!b || typeof b !== 'object') return null;
         if (b.type === 'link') {
           return { type: 'link', text: sanitizeText(b.text, 500), url: sanitizeUrl(b.url) };
@@ -602,12 +649,17 @@ function pullFromCloud() {
         return { type: 'text', value: sanitizeText(b.value, 5000) };
       }).filter(Boolean);
     }
-    if (updatedVal) lastCloudUpdatedAt = updatedVal;
-    store.updatedAt = updatedVal || null;
-    categoryFreshness.first = updatedVal || null;
-    categoryFreshness.highest = updatedVal || null;
+    if (results[4]) lastCloudUpdatedAt = results[4];
+    store.updatedAt = results[4] || null;
+    categoryFreshness.first = results[4] || null;
+    categoryFreshness.highest = results[4] || null;
     cloudCache = store;
     cloudSynced = true;
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
+    } catch (e) {
+      console.warn(e);
+    }
     cacheLocally(store);
     updateCustomCounts();
     applyHomeSettings();
@@ -633,6 +685,9 @@ function migrateFromRtdbIfNeeded() { return Promise.resolve(false); }
 function pullFromRealtime() { return pullFromCloud(); }
 function migrateFromRtdbIfNeeded() { return Promise.resolve(false); }
 
+function pullFromRealtime() { return pullFromCloud(); }
+function migrateFromRtdbIfNeeded() { return Promise.resolve(false); }
+
 /**
  * Лёгкая загрузка: только заголовок сайта, доп.блоки и метка updatedAt —
  * без самих вопросов/заданий/картинок. Этого достаточно для главной страницы;
@@ -640,20 +695,17 @@ function migrateFromRtdbIfNeeded() { return Promise.resolve(false); }
  * когда пользователь реально открывает тест или раздел управления.
  */
 function pullMetaFromCloud() {
-  return waitForFirebase(15000).then(function() {
-    setSyncStatus('syncing', 'Связь…');
-    try { firebase.database().goOnline(); } catch (e) {}
-    var db = firebase.database();
-    return Promise.all([
-      onceWithTimeout(db.ref(RTDB_PATH + '/siteTitle'), 20000),
-      onceWithTimeout(db.ref(RTDB_PATH + '/extraBlocks'), 20000),
-      onceWithTimeout(db.ref(RTDB_PATH + '/updatedAt'), 20000)
-    ]);
-  }).then(function(results) {
+  setSyncStatus('syncing', 'Связь…');
+  // REST-first: не зависит от WebSocket
+  return Promise.all([
+    loadPath(RTDB_PATH + '/siteTitle', 25000),
+    loadPath(RTDB_PATH + '/extraBlocks', 25000),
+    loadPath(RTDB_PATH + '/updatedAt', 25000)
+  ]).then(function(results) {
     if (!cloudCache) cloudCache = readLocalStore() || emptyStore();
-    var titleVal = results[0].val();
-    var blocksVal = results[1].val();
-    var updatedVal = results[2].val();
+    var titleVal = results[0];
+    var blocksVal = results[1];
+    var updatedVal = results[2];
     if (titleVal) cloudCache.siteTitle = sanitizeText(String(titleVal), 200);
     if (blocksVal) {
       cloudCache.extraBlocks = toArray(blocksVal).map(function(b) {
@@ -678,6 +730,7 @@ function pullMetaFromCloud() {
     return false;
   });
 }
+
 
 
 
@@ -712,48 +765,42 @@ function pullCategory(levelKey, parts) {
   if (!cloudCache) cloudCache = readLocalStore() || emptyStore();
   if (!cloudCache[levelKey]) cloudCache[levelKey] = { general: [], sectors: [] };
 
-  return waitForFirebase(20000).then(function() {
-    setSyncStatus('syncing', 'Загрузка…');
-    try { firebase.database().goOnline(); } catch (e) {}
-    var db = firebase.database();
-    var base = RTDB_PATH + '/' + levelKey;
-    var jobs = [];
+  setSyncStatus('syncing', 'Загрузка…');
+  var base = RTDB_PATH + '/' + levelKey;
+  var jobs = [];
 
-    if (parts.indexOf('general') >= 0) {
-      jobs.push(onceWithTimeout(db.ref(base + '/general'), 90000).then(function(snap) {
-        var arr = toArray(snap.val()).map(normalizeQuestion);
-        cloudCache[levelKey].general = arr;
-        console.log('loaded general', levelKey, arr.length);
-      }));
-    }
-    if (parts.indexOf('sectors') >= 0) {
-      jobs.push(onceWithTimeout(db.ref(base + '/sectors'), 90000).then(function(snap) {
-        cloudCache[levelKey].sectors = toArray(snap.val()).map(function(s) {
-          s = s || {};
-          return {
-            id: s.id || newSectorId(),
-            name: s.name || 'Сектор',
-            count: Math.max(0, parseInt(s.count, 10) || 0),
-            tasks: toArray(s.tasks).map(normalizeTaskItem)
-          };
-        });
-        var tc = cloudCache[levelKey].sectors.reduce(function(n, s) {
-          return n + (s.tasks || []).length;
-        }, 0);
-        console.log('loaded sectors', levelKey, 'tasks', tc);
-      }));
-    }
-    jobs.push(onceWithTimeout(db.ref(RTDB_PATH + '/updatedAt'), 20000).then(function(snap) {
-      var u = snap.val();
-      if (u) lastCloudUpdatedAt = u;
-      categoryFreshness[levelKey] = u || null;
-      cloudCache.updatedAt = u || null;
-    }).catch(function() {}));
+  if (parts.indexOf('general') >= 0) {
+    jobs.push(loadPath(base + '/general', 90000).then(function(val) {
+      var arr = toArray(val).map(normalizeQuestion);
+      cloudCache[levelKey].general = arr;
+      console.log('loaded general', levelKey, arr.length);
+    }));
+  }
+  if (parts.indexOf('sectors') >= 0) {
+    jobs.push(loadPath(base + '/sectors', 90000).then(function(val) {
+      cloudCache[levelKey].sectors = toArray(val).map(function(s) {
+        s = s || {};
+        return {
+          id: s.id || newSectorId(),
+          name: s.name || 'Сектор',
+          count: Math.max(0, parseInt(s.count, 10) || 0),
+          tasks: toArray(s.tasks).map(normalizeTaskItem)
+        };
+      });
+      var tc = cloudCache[levelKey].sectors.reduce(function(n, s) {
+        return n + (s.tasks || []).length;
+      }, 0);
+      console.log('loaded sectors', levelKey, 'tasks', tc);
+    }));
+  }
+  jobs.push(loadPath(RTDB_PATH + '/updatedAt', 20000).then(function(u) {
+    if (u) lastCloudUpdatedAt = u;
+    categoryFreshness[levelKey] = u || null;
+    cloudCache.updatedAt = u || null;
+  }).catch(function() {}));
 
-    return Promise.all(jobs);
-  }).then(function() {
+  return Promise.all(jobs).then(function() {
     cloudSynced = true;
-    // сразу пишем кэш (не ждать debounce) — чтобы после F5 были актуальные числа
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(cloudCache));
     } catch (e) {
@@ -769,6 +816,7 @@ function pullCategory(levelKey, parts) {
     return cloudCache[levelKey];
   });
 }
+
 
 
 
@@ -2899,14 +2947,13 @@ function loadFirebaseSdk() {
 
 
 function bootFirebase() {
-  if (window._bootStarted && firebaseReady && cloudSynced) return;
+  if (window._bootStarted && firebaseReady && cloudSynced && countContent(cloudCache) > 50) return;
   window._bootStarted = true;
 
   function afterInit() {
-    // Всегда тянем актуальные данные из Firebase (не доверяем старому кэшу 51)
+    // REST умеет работать даже без SDK; SDK нужен для записи админом
     pullMetaFromCloud().then(function() {
-      listenCloud();
-      // полная подгрузка general + sectors для обеих категорий
+      try { listenCloud(); } catch (e) {}
       return Promise.all([
         pullCategory('first', ['general', 'sectors']),
         pullCategory('highest', ['general', 'sectors'])
@@ -2916,9 +2963,7 @@ function bootFirebase() {
       applyHomeSettings();
       var n = countContent(cloudCache);
       setSyncStatus(n ? 'ok' : 'err', n ? ('Загружено: ' + n) : 'Нет данных');
-      console.log('boot done', n,
-        'first', cloudCache.first && cloudCache.first.general && cloudCache.first.general.length,
-        'highest', cloudCache.highest && cloudCache.highest.general && cloudCache.highest.general.length);
+      console.log('boot done', n);
     }).catch(function(e) {
       console.error('boot sync', e);
       setSyncStatus(countContent(cloudCache) ? 'ok' : 'err', 'Офлайн / ошибка');
@@ -2927,30 +2972,20 @@ function bootFirebase() {
   }
 
   function start() {
-    try {
-      initFirebase();
-      afterInit();
-    } catch (e) {
-      console.error(e);
-      setSyncStatus('err', 'Ошибка init');
-      setTimeout(function() {
-        try { initFirebase(); afterInit(); } catch (e2) {}
-      }, 2000);
-    }
+    try { initFirebase(); } catch (e) { console.error(e); }
+    afterInit();
   }
 
   if (window.firebase && window.firebase.app) {
     start();
     return;
   }
-  loadFirebaseSdk().then(start).catch(function(e) {
-    console.error(e);
-    setSyncStatus('err', 'SDK не загрузился');
-    setTimeout(function() {
-      loadFirebaseSdk().then(start).catch(function() {});
-    }, 2500);
+  loadFirebaseSdk().then(start).catch(function() {
+    // SDK нет — всё равно читаем через REST
+    afterInit();
   });
 }
+
 
 
 
