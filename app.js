@@ -645,9 +645,9 @@ function pullMetaFromCloud() {
     try { firebase.database().goOnline(); } catch (e) {}
     var db = firebase.database();
     return Promise.all([
-      onceWithTimeout(db.ref(RTDB_PATH + '/siteTitle'), 10000),
-      onceWithTimeout(db.ref(RTDB_PATH + '/extraBlocks'), 10000),
-      onceWithTimeout(db.ref(RTDB_PATH + '/updatedAt'), 10000)
+      onceWithTimeout(db.ref(RTDB_PATH + '/siteTitle'), 20000),
+      onceWithTimeout(db.ref(RTDB_PATH + '/extraBlocks'), 20000),
+      onceWithTimeout(db.ref(RTDB_PATH + '/updatedAt'), 20000)
     ]);
   }).then(function(results) {
     if (!cloudCache) cloudCache = readLocalStore() || emptyStore();
@@ -720,14 +720,14 @@ function pullCategory(levelKey, parts) {
     var jobs = [];
 
     if (parts.indexOf('general') >= 0) {
-      jobs.push(onceWithTimeout(db.ref(base + '/general'), 45000).then(function(snap) {
+      jobs.push(onceWithTimeout(db.ref(base + '/general'), 90000).then(function(snap) {
         var arr = toArray(snap.val()).map(normalizeQuestion);
         cloudCache[levelKey].general = arr;
         console.log('loaded general', levelKey, arr.length);
       }));
     }
     if (parts.indexOf('sectors') >= 0) {
-      jobs.push(onceWithTimeout(db.ref(base + '/sectors'), 45000).then(function(snap) {
+      jobs.push(onceWithTimeout(db.ref(base + '/sectors'), 90000).then(function(snap) {
         cloudCache[levelKey].sectors = toArray(snap.val()).map(function(s) {
           s = s || {};
           return {
@@ -743,7 +743,7 @@ function pullCategory(levelKey, parts) {
         console.log('loaded sectors', levelKey, 'tasks', tc);
       }));
     }
-    jobs.push(onceWithTimeout(db.ref(RTDB_PATH + '/updatedAt'), 12000).then(function(snap) {
+    jobs.push(onceWithTimeout(db.ref(RTDB_PATH + '/updatedAt'), 20000).then(function(snap) {
       var u = snap.val();
       if (u) lastCloudUpdatedAt = u;
       categoryFreshness[levelKey] = u || null;
@@ -2874,42 +2874,27 @@ function escapeAttr(s) {
 
 
 function loadFirebaseSdk() {
+  // Скрипты уже в index.html — не вставляем теги (CSP часто блокирует динамическую загрузку)
   return new Promise(function(resolve, reject) {
     if (window.firebase && window.firebase.app) {
       resolve();
       return;
     }
-    if (window._fbSdkLoading) {
-      window._fbSdkLoading.then(resolve, reject);
-      return;
-    }
-    const urls = [
-      'https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js',
-      'https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js',
-      'https://www.gstatic.com/firebasejs/10.14.1/firebase-database-compat.js'
-    ];
-    window._fbSdkLoading = new Promise(function(res, rej) {
-      function loadScript(url) {
-        return new Promise(function(r, j) {
-          // уже есть на странице?
-          var existing = document.querySelector('script[src="' + url + '"]');
-          if (existing) { r(); return; }
-          const s = document.createElement('script');
-          s.src = url;
-          s.async = false;
-          s.onload = function() { r(); };
-          s.onerror = function() { j(new Error('Не загрузился: ' + url)); };
-          document.head.appendChild(s);
-        });
+    var n = 0;
+    (function wait() {
+      if (window.firebase && window.firebase.app) {
+        resolve();
+        return;
       }
-      loadScript(urls[0])
-        .then(function() { return Promise.all([loadScript(urls[1]), loadScript(urls[2])]); })
-        .then(function() { res(); })
-        .catch(rej);
-    });
-    window._fbSdkLoading.then(resolve, reject);
+      if (n++ > 100) {
+        reject(new Error('Firebase SDK не найден на странице'));
+        return;
+      }
+      setTimeout(wait, 50);
+    })();
   });
 }
+
 
 
 
