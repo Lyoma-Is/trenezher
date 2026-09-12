@@ -712,7 +712,7 @@ function pullCategory(levelKey, parts) {
   if (!cloudCache) cloudCache = readLocalStore() || emptyStore();
   if (!cloudCache[levelKey]) cloudCache[levelKey] = { general: [], sectors: [] };
 
-  return waitForFirebase(15000).then(function() {
+  return waitForFirebase(20000).then(function() {
     setSyncStatus('syncing', 'Загрузка…');
     try { firebase.database().goOnline(); } catch (e) {}
     var db = firebase.database();
@@ -720,12 +720,14 @@ function pullCategory(levelKey, parts) {
     var jobs = [];
 
     if (parts.indexOf('general') >= 0) {
-      jobs.push(onceWithTimeout(db.ref(base + '/general'), 20000).then(function(snap) {
-        cloudCache[levelKey].general = toArray(snap.val()).map(normalizeQuestion);
+      jobs.push(onceWithTimeout(db.ref(base + '/general'), 45000).then(function(snap) {
+        var arr = toArray(snap.val()).map(normalizeQuestion);
+        cloudCache[levelKey].general = arr;
+        console.log('loaded general', levelKey, arr.length);
       }));
     }
     if (parts.indexOf('sectors') >= 0) {
-      jobs.push(onceWithTimeout(db.ref(base + '/sectors'), 25000).then(function(snap) {
+      jobs.push(onceWithTimeout(db.ref(base + '/sectors'), 45000).then(function(snap) {
         cloudCache[levelKey].sectors = toArray(snap.val()).map(function(s) {
           s = s || {};
           return {
@@ -735,9 +737,13 @@ function pullCategory(levelKey, parts) {
             tasks: toArray(s.tasks).map(normalizeTaskItem)
           };
         });
+        var tc = cloudCache[levelKey].sectors.reduce(function(n, s) {
+          return n + (s.tasks || []).length;
+        }, 0);
+        console.log('loaded sectors', levelKey, 'tasks', tc);
       }));
     }
-    jobs.push(onceWithTimeout(db.ref(RTDB_PATH + '/updatedAt'), 10000).then(function(snap) {
+    jobs.push(onceWithTimeout(db.ref(RTDB_PATH + '/updatedAt'), 12000).then(function(snap) {
       var u = snap.val();
       if (u) lastCloudUpdatedAt = u;
       categoryFreshness[levelKey] = u || null;
@@ -747,6 +753,12 @@ function pullCategory(levelKey, parts) {
     return Promise.all(jobs);
   }).then(function() {
     cloudSynced = true;
+    // сразу пишем кэш (не ждать debounce) — чтобы после F5 были актуальные числа
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(cloudCache));
+    } catch (e) {
+      console.warn('localStorage', e);
+    }
     cacheLocally(cloudCache);
     updateCustomCounts();
     setSyncStatus('ok', 'Готово');
@@ -761,10 +773,11 @@ function pullCategory(levelKey, parts) {
 
 
 
+
 /** Загружает уровень, только если он ещё не подтягивался в этой сессии
  * или устарел (сервер сообщил новый updatedAt после последней синхронизации
  * этого уровня) — иначе просто отдаёт то, что уже в памяти. */
-function ensureCategoryLoaded(level, parts) {
+function ensureCategoryLoaded(level, parts, force) {
   var lk = level === 'highest' ? 'highest' : 'first';
   parts = parts || ['general', 'sectors'];
   if (!cloudCache) cloudCache = readLocalStore() || emptyStore();
@@ -775,31 +788,26 @@ function ensureCategoryLoaded(level, parts) {
   var hasG = !needG || (side.general && side.general.length > 0);
   var hasS = !needS || (side.sectors && side.sectors.length > 0);
 
-  // Есть в кэше — отдаём сразу (все браузеры)
-  if (hasG && hasS) {
-    if (firebaseReady) {
-      // обновить в фоне при устаревании
-      if (lastCloudUpdatedAt && categoryFreshness[lk] !== lastCloudUpdatedAt) {
-        pullCategory(lk, parts);
-      }
-    }
+  // force или пусто — грузим из Firebase
+  if (!force && hasG && hasS) {
     return Promise.resolve(side);
   }
 
-  // Нет в кэше — грузим с ретраями
   function attempt(left) {
     return pullCategory(lk, parts).then(function(s) {
       var side2 = s || cloudCache[lk] || { general: [], sectors: [] };
       var okG = !needG || (side2.general && side2.general.length);
       var okS = !needS || (side2.sectors && side2.sectors.length);
-      if ((okG && okS) || left <= 1) return side2;
+      if ((okG || !needG) && (okS || !needS)) return side2;
+      if (left <= 1) return side2;
       return new Promise(function(resolve) {
-        setTimeout(function() { resolve(attempt(left - 1)); }, 1500);
+        setTimeout(function() { resolve(attempt(left - 1)); }, 1200);
       });
     });
   }
   return attempt(3);
 }
+
 
 
 
@@ -885,20 +893,28 @@ function forceFullSync() {
   setSyncStatus('syncing', 'Синхронизация…');
   cloudLoading = false;
   window._pullInFlight = null;
+  // сброс «свежести», чтобы точно перекачать
+  categoryFreshness = { first: null, highest: null };
   return waitForFirebase(20000).then(function() {
-    return pullFromCloud();
-  }).then(function(ok) {
+    return Promise.all([
+      pullCategory('first', ['general', 'sectors']),
+      pullCategory('highest', ['general', 'sectors']),
+      pullMetaFromCloud()
+    ]);
+  }).then(function() {
     updateCustomCounts();
     applyHomeSettings();
     var manage = document.getElementById('manage-page');
     if (manage && manage.classList.contains('active')) renderQuestionsList();
-    if (ok) setSyncStatus('ok', 'Синхронизировано: ' + countContent(cloudCache || emptyStore()));
-    else if (countContent(cloudCache)) setSyncStatus('ok', 'Кэш');
-    else setSyncStatus('err', 'Не удалось загрузить — нажмите ещё раз');
+    var n = countContent(cloudCache || emptyStore());
+    if (n) setSyncStatus('ok', 'Синхронизировано: ' + n);
+    else setSyncStatus('err', 'Пусто — проверьте Firebase');
+    console.log('force sync', n);
   }).catch(function(e) {
     setSyncStatus('err', (e && e.message) || 'Сбой');
   });
 }
+
 
 
 
@@ -1195,7 +1211,7 @@ function tablesEqual(a, b) {
 
 function startGeneralQuiz(level) {
   const levelKey = level === 'highest' ? 'highest' : 'first';
-  ensureCategoryLoaded(level, ['general']).then(function() {
+  ensureCategoryLoaded(level, ['general'], true).then(function() {
     const inputId = level === 'first' ? 'count-first' : 'count-highest';
     const maxAllowed = level === 'first' ? 300 : 600;
     let count = parseInt(document.getElementById(inputId).value, 10);
@@ -1243,7 +1259,7 @@ function startGeneralQuiz(level) {
 }
 
 function startInformaticsQuiz(level) {
-  ensureCategoryLoaded(level, ['general', 'sectors']).then(function() {
+  ensureCategoryLoaded(level, ['general', 'sectors'], true).then(function() {
     _startInformaticsQuizBody(level);
   }).catch(function(e) {
     console.error(e);
@@ -2898,29 +2914,30 @@ function loadFirebaseSdk() {
 
 
 function bootFirebase() {
-  if (window._bootStarted && firebaseReady) return;
+  if (window._bootStarted && firebaseReady && cloudSynced) return;
   window._bootStarted = true;
 
   function afterInit() {
+    // Всегда тянем актуальные данные из Firebase (не доверяем старому кэшу 51)
     pullMetaFromCloud().then(function() {
       listenCloud();
-      updateCustomCounts();
-      applyHomeSettings();
-      // если кэш пуст — полная загрузка
-      if (!countContent(cloudCache)) {
-        return pullFromCloud();
-      }
-      // иначе тихо подтянуть только general обеих категорий для счётчиков
+      // полная подгрузка general + sectors для обеих категорий
       return Promise.all([
-        pullCategory('first', ['general']).catch(function() {}),
-        pullCategory('highest', ['general']).catch(function() {})
+        pullCategory('first', ['general', 'sectors']),
+        pullCategory('highest', ['general', 'sectors'])
       ]);
     }).then(function() {
       updateCustomCounts();
       applyHomeSettings();
+      var n = countContent(cloudCache);
+      setSyncStatus(n ? 'ok' : 'err', n ? ('Загружено: ' + n) : 'Нет данных');
+      console.log('boot done', n,
+        'first', cloudCache.first && cloudCache.first.general && cloudCache.first.general.length,
+        'highest', cloudCache.highest && cloudCache.highest.general && cloudCache.highest.general.length);
     }).catch(function(e) {
       console.error('boot sync', e);
       setSyncStatus(countContent(cloudCache) ? 'ok' : 'err', 'Офлайн / ошибка');
+      updateCustomCounts();
     });
   }
 
@@ -2949,6 +2966,7 @@ function bootFirebase() {
     }, 2500);
   });
 }
+
 
 
 
