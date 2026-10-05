@@ -27,7 +27,7 @@
           </div>
 
           <div class="action-row">
-            <button class="btn btn-primary" onclick="startGeneralQuiz('first')">Общие вопросы</button>
+            <button class="btn btn-primary" onclick="startGeneralQuiz('first')">Тренажёр общих вопросов</button>
             <div class="input-group">
               <label for="count-first">Количество вопросов:</label>
               <input type="number" id="count-first" min="1" max="300" value="20" class="question-count">
@@ -41,7 +41,7 @@
 
           <div class="action-row">
             <button class="btn btn-secondary" onclick="startInformaticsQuiz('first')">Тренажёр по информатике</button>
-            <p class="info-text">40 вопросов: 10 общих + 30 заданий</p>
+            <textarea id="info-hint-first" class="info-text-input" rows="1" title="Подпись к тренажёру" oninput="autoResizeHint(this); saveInformaticsHint('first', this.value)" onchange="saveInformaticsHint('first', this.value)" onblur="saveInformaticsHint('first', this.value)">40 вопросов: 10 общих + 30 заданий</textarea>
           </div>
           <div class="action-row action-row-sub">
             <button class="btn btn-outline btn-outline-teal admin-only" onclick="openManagePage('informatics', 'first')">+ Добавить задания</button>
@@ -56,7 +56,7 @@
           </div>
 
           <div class="action-row">
-            <button class="btn btn-primary" onclick="startGeneralQuiz('highest')">Общие вопросы</button>
+            <button class="btn btn-primary" onclick="startGeneralQuiz('highest')">Тренажёр общих вопросов</button>
             <div class="input-group">
               <label for="count-highest">Количество вопросов:</label>
               <input type="number" id="count-highest" min="1" max="600" value="30" class="question-count">
@@ -70,7 +70,7 @@
 
           <div class="action-row">
             <button class="btn btn-secondary" onclick="startInformaticsQuiz('highest')">Тренажёр по информатике</button>
-            <p class="info-text">40 вопросов: 10 общих + 30 заданий</p>
+            <textarea id="info-hint-highest" class="info-text-input" rows="1" title="Подпись к тренажёру" oninput="autoResizeHint(this); saveInformaticsHint('highest', this.value)" onchange="saveInformaticsHint('highest', this.value)" onblur="saveInformaticsHint('highest', this.value)">40 вопросов: 10 общих + 30 заданий</textarea>
           </div>
           <div class="action-row action-row-sub">
             <button class="btn btn-outline btn-outline-teal admin-only" onclick="openManagePage('informatics', 'highest')">+ Добавить задания</button>

@@ -3,6 +3,7 @@
 
 const STORAGE_KEY = 'teacher-trainer-custom-v3';
 const COUNTS_KEY = 'teacher-trainer-counts-v1';
+const DEFAULT_INFORMATICS_HINT = '40 вопросов: 10 общих + 30 заданий';
 
 
 // —— Безопасность ——
@@ -176,6 +177,8 @@ function emptyStore() {
   return {
     siteTitle: 'Тренажёр для подготовки к аттестации учителей',
     extraBlocks: [],
+    informaticsHintFirst: DEFAULT_INFORMATICS_HINT,
+    informaticsHintHighest: DEFAULT_INFORMATICS_HINT,
     first: { general: [], sectors: [] },
     highest: { general: [], sectors: [] }
   };
@@ -369,6 +372,12 @@ function normalizeStore(data) {
   store.first = fixSide(data.first);
   store.highest = fixSide(data.highest);
   if (data.siteTitle) store.siteTitle = sanitizeText(data.siteTitle, 200);
+  store.informaticsHintFirst = data.informaticsHintFirst != null
+    ? sanitizeText(data.informaticsHintFirst, 300)
+    : DEFAULT_INFORMATICS_HINT;
+  store.informaticsHintHighest = data.informaticsHintHighest != null
+    ? sanitizeText(data.informaticsHintHighest, 300)
+    : DEFAULT_INFORMATICS_HINT;
   store.extraBlocks = toArray(data.extraBlocks).map(function(b) {
     if (!b || typeof b !== 'object') return null;
     if (b.type === 'link') {
@@ -540,6 +549,8 @@ function pushToCloud(data) {
       updates[RTDB_PATH + '/first'] = payload.first;
       updates[RTDB_PATH + '/highest'] = payload.highest;
       updates[RTDB_PATH + '/siteTitle'] = payload.siteTitle || '';
+      updates[RTDB_PATH + '/informaticsHintFirst'] = payload.informaticsHintFirst || '';
+      updates[RTDB_PATH + '/informaticsHintHighest'] = payload.informaticsHintHighest || '';
       updates[RTDB_PATH + '/extraBlocks'] = payload.extraBlocks || [];
       updates[RTDB_PATH + '/updatedAt'] = updatedAt;
       updates[RTDB_PATH + '/updatedBy'] = user.uid;
@@ -611,7 +622,9 @@ function pullFromCloud() {
     loadPath(RTDB_PATH + '/highest', 90000),
     loadPath(RTDB_PATH + '/siteTitle', 20000),
     loadPath(RTDB_PATH + '/extraBlocks', 20000),
-    loadPath(RTDB_PATH + '/updatedAt', 20000)
+    loadPath(RTDB_PATH + '/updatedAt', 20000),
+    loadPath(RTDB_PATH + '/informaticsHintFirst', 20000),
+    loadPath(RTDB_PATH + '/informaticsHintHighest', 20000)
   ]).then(function(results) {
     cloudLoading = false;
     window._pullInFlight = null;
@@ -645,6 +658,8 @@ function pullFromCloud() {
     }
     if (results[4]) lastCloudUpdatedAt = results[4];
     store.updatedAt = results[4] || null;
+    if (results[5] != null) store.informaticsHintFirst = sanitizeText(String(results[5]), 300);
+    if (results[6] != null) store.informaticsHintHighest = sanitizeText(String(results[6]), 300);
     categoryFreshness.first = results[4] || null;
     categoryFreshness.highest = results[4] || null;
     cloudCache = store;
@@ -694,13 +709,19 @@ function pullMetaFromCloud() {
   return Promise.all([
     loadPath(RTDB_PATH + '/siteTitle', 25000),
     loadPath(RTDB_PATH + '/extraBlocks', 25000),
-    loadPath(RTDB_PATH + '/updatedAt', 25000)
+    loadPath(RTDB_PATH + '/updatedAt', 25000),
+    loadPath(RTDB_PATH + '/informaticsHintFirst', 25000),
+    loadPath(RTDB_PATH + '/informaticsHintHighest', 25000)
   ]).then(function(results) {
     if (!cloudCache) cloudCache = readLocalStore() || emptyStore();
     var titleVal = results[0];
     var blocksVal = results[1];
     var updatedVal = results[2];
+    var hintFirst = results[3];
+    var hintHighest = results[4];
     if (titleVal) cloudCache.siteTitle = sanitizeText(String(titleVal), 200);
+    if (hintFirst != null) cloudCache.informaticsHintFirst = sanitizeText(String(hintFirst), 300);
+    if (hintHighest != null) cloudCache.informaticsHintHighest = sanitizeText(String(hintHighest), 300);
     if (blocksVal) {
       cloudCache.extraBlocks = toArray(blocksVal).map(function(b) {
         if (!b || typeof b !== 'object') return null;
@@ -889,6 +910,8 @@ function mergeStores(a, b) {
   b = normalizeStore(b || emptyStore());
   const out = emptyStore();
   out.siteTitle = a.siteTitle || b.siteTitle;
+  out.informaticsHintFirst = a.informaticsHintFirst != null ? a.informaticsHintFirst : b.informaticsHintFirst;
+  out.informaticsHintHighest = a.informaticsHintHighest != null ? a.informaticsHintHighest : b.informaticsHintHighest;
   out.extraBlocks = (a.extraBlocks && a.extraBlocks.length >= (b.extraBlocks || []).length)
     ? a.extraBlocks : (b.extraBlocks || []);
   ['first', 'highest'].forEach(function(side) {
@@ -984,6 +1007,12 @@ function autoResizeTitle(el) {
   el.style.height = Math.max(el.scrollHeight, 40) + 'px';
 }
 
+function autoResizeHint(el) {
+  if (!el) return;
+  el.style.height = 'auto';
+  el.style.height = Math.max(el.scrollHeight, 28) + 'px';
+}
+
 function applyHomeSettings() {
   const data = loadCustom();
   const titleEl = document.getElementById('site-title');
@@ -992,7 +1021,30 @@ function applyHomeSettings() {
     document.title = titleEl.value;
     autoResizeTitle(titleEl);
   }
+  applyInformaticsHints(data);
   renderExtraBlocks();
+}
+
+function applyInformaticsHints(data) {
+  data = data || loadCustom();
+  var firstEl = document.getElementById('info-hint-first');
+  var highestEl = document.getElementById('info-hint-highest');
+  var firstVal = data.informaticsHintFirst != null ? data.informaticsHintFirst : DEFAULT_INFORMATICS_HINT;
+  var highestVal = data.informaticsHintHighest != null ? data.informaticsHintHighest : DEFAULT_INFORMATICS_HINT;
+  if (firstEl && firstEl.value !== firstVal) firstEl.value = firstVal;
+  if (highestEl && highestEl.value !== highestVal) highestEl.value = highestVal;
+  if (firstEl) autoResizeHint(firstEl);
+  if (highestEl) autoResizeHint(highestEl);
+}
+
+function saveInformaticsHint(level, value) {
+  if (!isAdmin()) return;
+  const data = loadCustom();
+  const key = level === 'highest' ? 'informaticsHintHighest' : 'informaticsHintFirst';
+  data[key] = sanitizeText(value, 300);
+  saveCustom(data);
+  const el = document.getElementById(level === 'highest' ? 'info-hint-highest' : 'info-hint-first');
+  if (el) autoResizeHint(el);
 }
 
 function saveSiteTitle(value) {

@@ -248,6 +248,45 @@ body {
   color: var(--text-muted);
 }
 
+.info-text-input {
+  flex: 1;
+  min-width: 160px;
+  font-family: inherit;
+  font-size: 0.9rem;
+  line-height: 1.45;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px dashed transparent;
+  border-radius: 10px;
+  padding: 8px 10px;
+  margin: 0;
+  resize: none;
+  overflow: hidden;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  overflow-wrap: anywhere;
+  min-height: 2.2em;
+  field-sizing: content;
+}
+
+.info-text-input:hover {
+  border-color: var(--border);
+  background: var(--surface-2);
+}
+
+.info-text-input:focus {
+  outline: none;
+  border-color: var(--primary);
+  background: #fff;
+  color: var(--text);
+}
+
+body:not(.is-admin) .info-text-input {
+  pointer-events: none;
+  border-color: transparent !important;
+  background: transparent !important;
+}
+
 /* ===== Footer ===== */
 .footer {
   text-align: center;
