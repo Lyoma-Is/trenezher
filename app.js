@@ -179,6 +179,10 @@ function emptyStore() {
     extraBlocks: [],
     informaticsHintFirst: DEFAULT_INFORMATICS_HINT,
     informaticsHintHighest: DEFAULT_INFORMATICS_HINT,
+    shareTasksFirst: false,
+    shareTasksHighest: false,
+    tasksSectorFilterFirst: null,
+    tasksSectorFilterHighest: null,
     first: { general: [], sectors: [] },
     highest: { general: [], sectors: [] }
   };
@@ -389,6 +393,12 @@ function normalizeStore(data) {
     }
     return { type: 'text', value: sanitizeText(b.value, 5000) };
   }).filter(Boolean);
+  store.shareTasksFirst = !!data.shareTasksFirst;
+  store.shareTasksHighest = !!data.shareTasksHighest;
+  store.tasksSectorFilterFirst = (data.tasksSectorFilterFirst && typeof data.tasksSectorFilterFirst === 'object')
+    ? data.tasksSectorFilterFirst : null;
+  store.tasksSectorFilterHighest = (data.tasksSectorFilterHighest && typeof data.tasksSectorFilterHighest === 'object')
+    ? data.tasksSectorFilterHighest : null;
   return store;
 }
 
@@ -498,6 +508,16 @@ function loadCustom() {
  */
 function saveCustom(data) {
   const normalized = normalizeStore(data);
+  // Если галочки «Общие» на обеих категориях — задания синхронизируются
+  if (normalized.shareTasksFirst && normalized.shareTasksHighest) {
+    if (manageMode === 'informatics') {
+      const src = manageLevel === 'highest' ? 'highest' : 'first';
+      const dst = src === 'first' ? 'highest' : 'first';
+      normalized[dst].sectors = JSON.parse(JSON.stringify(normalized[src].sectors || []));
+    } else {
+      normalized.highest.sectors = JSON.parse(JSON.stringify(normalized.first.sectors || []));
+    }
+  }
   cloudCache = normalized;
   cloudSynced = true;
   cacheLocally(normalized);
@@ -552,6 +572,10 @@ function pushToCloud(data) {
       updates[RTDB_PATH + '/informaticsHintFirst'] = payload.informaticsHintFirst || '';
       updates[RTDB_PATH + '/informaticsHintHighest'] = payload.informaticsHintHighest || '';
       updates[RTDB_PATH + '/extraBlocks'] = payload.extraBlocks || [];
+      updates[RTDB_PATH + '/shareTasksFirst'] = !!payload.shareTasksFirst;
+      updates[RTDB_PATH + '/shareTasksHighest'] = !!payload.shareTasksHighest;
+      updates[RTDB_PATH + '/tasksSectorFilterFirst'] = payload.tasksSectorFilterFirst || null;
+      updates[RTDB_PATH + '/tasksSectorFilterHighest'] = payload.tasksSectorFilterHighest || null;
       updates[RTDB_PATH + '/updatedAt'] = updatedAt;
       updates[RTDB_PATH + '/updatedBy'] = user.uid;
 
@@ -624,7 +648,11 @@ function pullFromCloud() {
     loadPath(RTDB_PATH + '/extraBlocks', 20000),
     loadPath(RTDB_PATH + '/updatedAt', 20000),
     loadPath(RTDB_PATH + '/informaticsHintFirst', 20000),
-    loadPath(RTDB_PATH + '/informaticsHintHighest', 20000)
+    loadPath(RTDB_PATH + '/informaticsHintHighest', 20000),
+    loadPath(RTDB_PATH + '/shareTasksFirst', 20000),
+    loadPath(RTDB_PATH + '/shareTasksHighest', 20000),
+    loadPath(RTDB_PATH + '/tasksSectorFilterFirst', 20000),
+    loadPath(RTDB_PATH + '/tasksSectorFilterHighest', 20000)
   ]).then(function(results) {
     cloudLoading = false;
     window._pullInFlight = null;
@@ -660,6 +688,10 @@ function pullFromCloud() {
     store.updatedAt = results[4] || null;
     if (results[5] != null) store.informaticsHintFirst = sanitizeText(String(results[5]), 300);
     if (results[6] != null) store.informaticsHintHighest = sanitizeText(String(results[6]), 300);
+    store.shareTasksFirst = !!results[7];
+    store.shareTasksHighest = !!results[8];
+    store.tasksSectorFilterFirst = (results[9] && typeof results[9] === 'object') ? results[9] : null;
+    store.tasksSectorFilterHighest = (results[10] && typeof results[10] === 'object') ? results[10] : null;
     categoryFreshness.first = results[4] || null;
     categoryFreshness.highest = results[4] || null;
     cloudCache = store;
@@ -1023,6 +1055,8 @@ function applyHomeSettings() {
   }
   applyInformaticsHints(data);
   renderExtraBlocks();
+  updateShareTasksUI();
+  renderTasksSectorFilters();
 }
 
 function applyInformaticsHints(data) {
@@ -1195,15 +1229,21 @@ function updateCustomCounts() {
     return (side.sectors || []).reduce(function(s, sec) { return s + (sec.tasks || []).length; }, 0);
   }
   const fg = (data.first.general || []).length;
-  const ft = taskCount(data.first);
+  let ft = taskCount(data.first);
   const hg = (data.highest.general || []).length;
-  const ht = taskCount(data.highest);
+  let ht = taskCount(data.highest);
+  if (data.shareTasksFirst && data.shareTasksHighest) {
+    const shared = Math.max(ft, ht);
+    ft = shared;
+    ht = shared;
+  }
   set('count-general-first', fg, 'Ваших');
   set('count-tasks-first', ft, 'Ваших');
   set('count-general-highest', hg, 'Ваших');
   set('count-tasks-highest', ht, 'Ваших');
   setCat('cat-counts-first', fg, ft);
   setCat('cat-counts-highest', hg, ht);
+  if (typeof renderTasksSectorFilters === 'function') renderTasksSectorFilters();
 }
 
 // —— Навигация ——
@@ -1318,6 +1358,118 @@ function tablesEqual(a, b) {
   return true;
 }
 
+
+/** Задания общие, если галочки стоят и на первой, и на высшей */
+function isTasksShared(data) {
+  data = data || loadCustom();
+  return !!(data.shareTasksFirst && data.shareTasksHighest);
+}
+
+/** Секторы для уровня: при общем режиме — одни и те же (из first) */
+function getSectorsForLevel(level, data) {
+  data = data || loadCustom();
+  if (isTasksShared(data)) {
+    return sortSectors(data.first && data.first.sectors ? data.first.sectors : []);
+  }
+  const lk = level === 'highest' ? 'highest' : 'first';
+  return sortSectors(data[lk] && data[lk].sectors ? data[lk].sectors : []);
+}
+
+function setShareTasks(level, checked) {
+  if (!requireAdmin()) {
+    updateShareTasksUI();
+    return;
+  }
+  const data = loadCustom();
+  if (level === 'highest') data.shareTasksHighest = !!checked;
+  else data.shareTasksFirst = !!checked;
+
+  if (data.shareTasksFirst && data.shareTasksHighest) {
+    function taskCount(side) {
+      return (side.sectors || []).reduce(function(n, s) {
+        return n + ((s.tasks || []).length);
+      }, 0);
+    }
+    const ft = taskCount(data.first || {});
+    const ht = taskCount(data.highest || {});
+    if (ft > ht || (ft === ht && level === 'first')) {
+      data.highest.sectors = JSON.parse(JSON.stringify(data.first.sectors || []));
+    } else if (ht > ft || (ft === ht && level === 'highest')) {
+      data.first.sectors = JSON.parse(JSON.stringify(data.highest.sectors || []));
+    } else {
+      data.highest.sectors = JSON.parse(JSON.stringify(data.first.sectors || []));
+    }
+  }
+  saveCustom(data);
+  updateShareTasksUI();
+  updateCustomCounts();
+}
+
+function updateShareTasksUI() {
+  const data = loadCustom();
+  const f = document.getElementById('share-tasks-first');
+  const h = document.getElementById('share-tasks-highest');
+  if (f) f.checked = !!data.shareTasksFirst;
+  if (h) h.checked = !!data.shareTasksHighest;
+}
+
+
+function sectorDisplayNum(sec, index) {
+  const m = String(sec && sec.name || '').trim().match(/(\d+)/);
+  if (m) return m[1];
+  return String(index + 1);
+}
+
+function isSectorEnabledForTasks(level, sectorId, data) {
+  data = data || loadCustom();
+  const key = level === 'highest' ? 'tasksSectorFilterHighest' : 'tasksSectorFilterFirst';
+  const filter = data[key];
+  if (!filter || typeof filter !== 'object') return true; // по умолчанию все включены
+  if (Object.prototype.hasOwnProperty.call(filter, sectorId)) return !!filter[sectorId];
+  return true;
+}
+
+function setTasksSectorFilter(level, sectorId, checked) {
+  if (!requireAdmin()) {
+    renderTasksSectorFilters();
+    return;
+  }
+  const data = loadCustom();
+  const key = level === 'highest' ? 'tasksSectorFilterHighest' : 'tasksSectorFilterFirst';
+  const sectors = getSectorsForLevel(level, data);
+  let filter = data[key];
+  if (!filter || typeof filter !== 'object') {
+    filter = {};
+    sectors.forEach(function(s) { filter[s.id] = true; });
+  }
+  filter[sectorId] = !!checked;
+  data[key] = filter;
+  saveCustom(data);
+  renderTasksSectorFilters();
+}
+
+function renderTasksSectorFilters() {
+  ['first', 'highest'].forEach(function(level) {
+    const el = document.getElementById('tasks-sector-filter-' + level);
+    if (!el) return;
+    const data = loadCustom();
+    const sectors = getSectorsForLevel(level, data);
+    if (!sectors.length) {
+      el.innerHTML = '';
+      return;
+    }
+    el.innerHTML = sectors.map(function(s, i) {
+      const num = sectorDisplayNum(s, i);
+      const on = isSectorEnabledForTasks(level, s.id, data);
+      const title = escapeAttr(s.name || ('Сектор ' + num));
+      return '<label class="sector-filter-item" title="' + title + '">' +
+        '<input type="checkbox"' + (on ? ' checked' : '') +
+        ' onchange="setTasksSectorFilter(\'' + level + '\', \'' + escapeAttr(s.id) + '\', this.checked)">' +
+        '<span class="sector-filter-num">' + escapeHtml(num) + '</span></label>';
+    }).join('');
+  });
+}
+
 function startGeneralQuiz(level) {
   const levelKey = level === 'highest' ? 'highest' : 'first';
   ensureCategoryLoaded(level, ['general'], true).then(function() {
@@ -1376,41 +1528,19 @@ function startInformaticsQuiz(level) {
   });
 }
 
-function _startInformaticsQuizBody(level) {
-  let custom = loadCustom();
-  const levelKey = level === 'highest' ? 'highest' : 'first';
-  let generalPool = (GENERAL_QUESTIONS || []).map(normalizeQuestion).concat(custom[levelKey].general || []);
-  let sectors = sortSectors(custom[levelKey].sectors || []);
-  let allTasks = sectors.reduce(function(acc, s) { return acc.concat(s.tasks || []); }, []);
-  if (!generalPool.length || !allTasks.length) {
-    const local = readLocalStore();
-    if (countContent(local) > countContent(custom)) {
-      custom = local;
-      cloudCache = local;
-      generalPool = (GENERAL_QUESTIONS || []).map(normalizeQuestion).concat(custom[levelKey].general || []);
-      sectors = sortSectors(custom[levelKey].sectors || []);
-      allTasks = sectors.reduce(function(acc, s) { return acc.concat(s.tasks || []); }, []);
-    }
-  }
-  if (!generalPool.length) {
-    appAlert('Вопросы не добавлены');
-    return;
-  }
-  if (!allTasks.length) {
-    appAlert('Задания не добавлены');
-    return;
-  }
+function startTasksQuiz(level) {
+  ensureCategoryLoaded(level, ['sectors'], true).then(function() {
+    _startTasksQuizBody(level);
+  }).catch(function(e) {
+    console.error(e);
+    appAlert('Не удалось загрузить задания. Проверьте интернет и обновите страницу.');
+  });
+}
 
-  let g = shuffle(generalPool).slice(0, Math.min(10, generalPool.length));
-  while (g.length < 10 && generalPool.length) {
-    g = g.concat(shuffle(generalPool));
-  }
-  g = g.slice(0, 10);
-
+/** Набор заданий из секторов (та же логика, что в тренажёре по информатике) */
+function pickTasksFromSectors(sectors) {
   let t = [];
 
-  // «Задание N» с подряд идущими номерами (19,20,21) — чередование с одним индексом.
-  // Остальные секторы (и одиночные «Задание N») — как раньше, независимо.
   function parseZadanieNum(name) {
     const m = String(name || '').trim().match(/^Задание\s*(\d+)$/i);
     return m ? parseInt(m[1], 10) : null;
@@ -1444,7 +1574,6 @@ function _startInformaticsQuizBody(level) {
       indices = indices.concat(shuffle(base.slice()));
     }
     indices = indices.slice(0, rounds);
-    // Задание19[i], Задание20[i], Задание21[i], затем следующий i
     indices.forEach(function(taskIdx) {
       group.forEach(function(sec) {
         const task = (sec.tasks || [])[taskIdx];
@@ -1453,8 +1582,6 @@ function _startInformaticsQuizBody(level) {
     });
   }
 
-  // Чередуются ТОЛЬКО Задание 19, 20, 21.
-  // Остальные: Задание 1, Задание 1, Задание 2, Задание 2… (по count сектора, по порядку номеров).
   const LINKED_NUMS = { 19: 1, 20: 1, 21: 1 };
   const plain = [];
   const linkedByNum = {};
@@ -1468,7 +1595,6 @@ function _startInformaticsQuizBody(level) {
     }
   });
 
-  // обычные секторы по возрастанию номера; без номера — в конце
   plain.sort(function(a, b) {
     if (a.num == null && b.num == null) return String(a.sec.name || '').localeCompare(String(b.sec.name || ''), 'ru');
     if (a.num == null) return 1;
@@ -1477,7 +1603,6 @@ function _startInformaticsQuizBody(level) {
   });
   plain.forEach(function(x) { pickPlain(x.sec); });
 
-  // 19 → 20 → 21 → 19 → 20 → 21 … в конце
   const linkedGroup = [19, 20, 21].map(function(n) { return linkedByNum[n]; }).filter(Boolean);
   if (linkedGroup.length >= 2) {
     pickLinkedGroup(linkedGroup);
@@ -1485,6 +1610,100 @@ function _startInformaticsQuizBody(level) {
     linkedGroup.forEach(pickPlain);
   }
 
+  return t;
+}
+
+function _startTasksQuizBody(level) {
+  let custom = loadCustom();
+  let sectors = getSectorsForLevel(level, custom);
+  let allTasks = sectors.reduce(function(acc, s) { return acc.concat(s.tasks || []); }, []);
+  if (!allTasks.length) {
+    const local = readLocalStore();
+    if (countContent(local) > countContent(custom)) {
+      custom = local;
+      cloudCache = local;
+      sectors = getSectorsForLevel(level, custom);
+      allTasks = sectors.reduce(function(acc, s) { return acc.concat(s.tasks || []); }, []);
+    }
+  }
+  if (!allTasks.length) {
+    appAlert('Задания не добавлены');
+    return;
+  }
+
+  // Количество разных заданий из каждого сектора (по умолчанию 3).
+  // Идут по порядку: сначала задания 1-го сектора, затем 2-го и т.д.
+  // Учитываются только секторы с включённой галочкой (настройка админа).
+  const countInputId = level === 'highest' ? 'tasks-repeat-highest' : 'tasks-repeat-first';
+  const countEl = document.getElementById(countInputId);
+  let perSector = countEl ? parseInt(countEl.value, 10) : 3;
+  if (isNaN(perSector) || perSector < 1) perSector = 1;
+  if (perSector > 50) perSector = 50;
+  if (countEl) countEl.value = perSector;
+
+  const enabledSectors = sectors.filter(function(s) {
+    return isSectorEnabledForTasks(level, s.id, custom);
+  });
+  if (!enabledSectors.length) {
+    appAlert('Не выбран ни один сектор заданий');
+    return;
+  }
+
+  const sectorsForPick = enabledSectors.map(function(s) {
+    return Object.assign({}, s, { count: perSector });
+  });
+  const t = pickTasksFromSectors(sectorsForPick);
+  if (!t.length) {
+    appAlert('Задания не добавлены');
+    return;
+  }
+
+  const questions = t.map(function(q) {
+    return Object.assign({}, q, { qType: 'practice' });
+  });
+  currentQuiz = {
+    questions: questions,
+    index: 0, score: 0, type: 'tasks-' + level, level: level,
+    answered: false, selected: [], states: initQuizStates(questions)
+  };
+  showPage('quiz-page');
+  startQuizTimer();
+  renderQuestion();
+  saveQuizProgress();
+}
+
+function _startInformaticsQuizBody(level) {
+  let custom = loadCustom();
+  const levelKey = level === 'highest' ? 'highest' : 'first';
+  let generalPool = (GENERAL_QUESTIONS || []).map(normalizeQuestion).concat(custom[levelKey].general || []);
+  let sectors = getSectorsForLevel(level, custom);
+  let allTasks = sectors.reduce(function(acc, s) { return acc.concat(s.tasks || []); }, []);
+  if (!generalPool.length || !allTasks.length) {
+    const local = readLocalStore();
+    if (countContent(local) > countContent(custom)) {
+      custom = local;
+      cloudCache = local;
+      generalPool = (GENERAL_QUESTIONS || []).map(normalizeQuestion).concat(custom[levelKey].general || []);
+      sectors = getSectorsForLevel(level, custom);
+      allTasks = sectors.reduce(function(acc, s) { return acc.concat(s.tasks || []); }, []);
+    }
+  }
+  if (!generalPool.length) {
+    appAlert('Вопросы не добавлены');
+    return;
+  }
+  if (!allTasks.length) {
+    appAlert('Задания не добавлены');
+    return;
+  }
+
+  let g = shuffle(generalPool).slice(0, Math.min(10, generalPool.length));
+  while (g.length < 10 && generalPool.length) {
+    g = g.concat(shuffle(generalPool));
+  }
+  g = g.slice(0, 10);
+
+  const t = pickTasksFromSectors(sectors);
   if (!t.length) {
     appAlert('Задания не добавлены');
     return;
@@ -2023,6 +2242,8 @@ function retryQuiz() {
     startGeneralQuiz(currentQuiz.type.split('-')[1]);
   } else if (currentQuiz.type.startsWith('informatics-')) {
     startInformaticsQuiz(currentQuiz.type.split('-')[1]);
+  } else if (currentQuiz.type.startsWith('tasks-')) {
+    startTasksQuiz(currentQuiz.type.split('-')[1]);
   }
 }
 
@@ -3141,6 +3362,7 @@ function applyAdminUI() {
     }
   }
   renderExtraBlocks();
+  renderTasksSectorFilters();
 }
 
 function openAuthPanel() {
@@ -3344,4 +3566,14 @@ document.addEventListener('DOMContentLoaded', function() {
       highestInput.value = v;
     });
   }
+  ['tasks-repeat-first', 'tasks-repeat-highest'].forEach(function(id) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('change', function() {
+      let v = parseInt(el.value, 10);
+      if (isNaN(v) || v < 1) v = 1;
+      if (v > 50) v = 50;
+      el.value = v;
+    });
+  });
 });

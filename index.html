@@ -43,8 +43,20 @@
             <button class="btn btn-secondary" onclick="startInformaticsQuiz('first')">Тренажёр по информатике</button>
             <textarea id="info-hint-first" class="info-text-input" rows="1" title="Подпись к тренажёру" oninput="autoResizeHint(this); saveInformaticsHint('first', this.value)" onchange="saveInformaticsHint('first', this.value)" onblur="saveInformaticsHint('first', this.value)">40 вопросов: 10 общих + 30 заданий</textarea>
           </div>
+          <div class="action-row">
+            <button class="btn btn-secondary" onclick="startTasksQuiz('first')">Тренажёр по заданиям</button>
+            <div class="input-group">
+              <label for="tasks-repeat-first">Количество заданий:</label>
+              <input type="number" id="tasks-repeat-first" min="1" max="50" value="3" class="question-count" title="Сколько разных заданий взять из каждого сектора (по порядку секторов)">
+            </div>
+          </div>
+          <div id="tasks-sector-filter-first" class="tasks-sector-filter admin-only" title="Какие секторы включать в тренажёр по заданиям"></div>
           <div class="action-row action-row-sub">
             <button class="btn btn-outline btn-outline-teal admin-only" onclick="openManagePage('informatics', 'first')">+ Добавить задания</button>
+            <label class="share-tasks-label admin-only" title="Если галочка стоит и на первой, и на высшей — задания общие">
+              <input type="checkbox" id="share-tasks-first" onchange="setShareTasks('first', this.checked)">
+              <span>Общие</span>
+            </label>
             <span class="custom-count admin-only" id="count-tasks-first"></span>
           </div>
         </section>
@@ -72,8 +84,20 @@
             <button class="btn btn-secondary" onclick="startInformaticsQuiz('highest')">Тренажёр по информатике</button>
             <textarea id="info-hint-highest" class="info-text-input" rows="1" title="Подпись к тренажёру" oninput="autoResizeHint(this); saveInformaticsHint('highest', this.value)" onchange="saveInformaticsHint('highest', this.value)" onblur="saveInformaticsHint('highest', this.value)">40 вопросов: 10 общих + 30 заданий</textarea>
           </div>
+          <div class="action-row">
+            <button class="btn btn-secondary" onclick="startTasksQuiz('highest')">Тренажёр по заданиям</button>
+            <div class="input-group">
+              <label for="tasks-repeat-highest">Количество заданий:</label>
+              <input type="number" id="tasks-repeat-highest" min="1" max="50" value="3" class="question-count" title="Сколько разных заданий взять из каждого сектора (по порядку секторов)">
+            </div>
+          </div>
+          <div id="tasks-sector-filter-highest" class="tasks-sector-filter admin-only" title="Какие секторы включать в тренажёр по заданиям"></div>
           <div class="action-row action-row-sub">
             <button class="btn btn-outline btn-outline-teal admin-only" onclick="openManagePage('informatics', 'highest')">+ Добавить задания</button>
+            <label class="share-tasks-label admin-only" title="Если галочка стоит и на первой, и на высшей — задания общие">
+              <input type="checkbox" id="share-tasks-highest" onchange="setShareTasks('highest', this.checked)">
+              <span>Общие</span>
+            </label>
             <span class="custom-count admin-only" id="count-tasks-highest"></span>
           </div>
         </section>
