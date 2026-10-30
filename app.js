@@ -2282,6 +2282,12 @@ function openManagePage(mode, level) {
       ? 'Общие вопросы (на ' + cat + ')'
       : 'Задания по информатике (на ' + cat + ')';
   document.getElementById('question-form').classList.add('hidden');
+  const si = document.getElementById('manage-search-input');
+  if (si) si.value = '';
+  const sm = document.getElementById('manage-search-msg');
+  if (sm) sm.textContent = '';
+  const sl = document.getElementById('manage-search-label');
+  if (sl) sl.textContent = mode === 'general' ? 'Перейти к вопросу №' : 'Перейти к заданию №';
   const tg = document.getElementById('toolbar-general');
   const tt = document.getElementById('toolbar-tasks');
   const sectorsList = document.getElementById('sectors-list');
@@ -3022,7 +3028,8 @@ function renderQuestionsList() {
         const ok = nq.correct.includes(i);
         return '<li class="' + (ok ? 'correct-opt' : '') + '"><span class="check-icon">' + (ok ? '✓' : '') + '</span><span>' + escapeHtml(o) + '</span></li>';
       }).join('');
-      return '<div class="q-card"><div class="q-card-header"><div class="q-card-text">' + escapeHtml(nq.text) +
+      const num = items.length - index; // номер стабильный: новые вопросы получают следующий номер
+      return '<div class="q-card" id="q-card-' + num + '"><div class="q-card-header"><div class="q-card-text"><span class="q-card-num">№' + num + '</span> ' + escapeHtml(nq.text) +
         '</div><div class="q-card-actions"><button class="btn-edit" onclick="editQuestion(' + index +
         ')">Изменить</button><button class="btn-del" onclick="deleteQuestion(' + index +
         ')">Удалить</button></div></div><span class="q-card-meta">' +
@@ -3056,7 +3063,7 @@ function renderQuestionsList() {
           (nFiles ? ' · файлов: ' + nFiles : '') + '</span></div>';
       }).join('');
     }
-    return '<div class="sector-card" data-id="' + sec.id + '"><div class="sector-header">' +
+    return '<div class="sector-card" id="sector-card-' + sec.id + '" data-id="' + sec.id + '"><div class="sector-header">' +
       '<input class="sector-name-input" value="' + escapeAttr(sec.name) + '" onchange="updateSectorName(\'' + sec.id +
       '\', this.value)" placeholder="Название сектора">' +
       '<div class="sector-count-wrap"><span>В тренажёр:</span>' +
@@ -3067,6 +3074,48 @@ function renderQuestionsList() {
       '<button class="btn btn-outline btn-danger-outline" onclick="deleteSector(\'' + sec.id +
       '\')">Удалить сектор</button></div><div class="sector-tasks">' + tasksHtml + '</div></div>';
   }).join('');
+}
+
+// —— Поиск по номеру ——
+function goToNumber() {
+  const input = document.getElementById('manage-search-input');
+  const msg = document.getElementById('manage-search-msg');
+  const n = parseInt(input && input.value, 10);
+  if (msg) msg.textContent = '';
+  if (isNaN(n) || n < 1) {
+    if (msg) msg.textContent = 'Введите номер';
+    return;
+  }
+  const data = loadCustom();
+  const lk = levelKey();
+  let el = null;
+  if (manageMode === 'general') {
+    const total = (data[lk].general || []).length;
+    if (n > total) {
+      if (msg) msg.textContent = 'Вопроса №' + n + ' нет (всего ' + total + ')';
+      return;
+    }
+    el = document.getElementById('q-card-' + n);
+  } else {
+    const sec = (data[lk].sectors || []).find(function(s) {
+      const m = String(s.name || '').match(/\d+/);
+      return m && parseInt(m[0], 10) === n;
+    });
+    if (!sec) {
+      if (msg) msg.textContent = 'Задания №' + n + ' нет';
+      return;
+    }
+    el = document.getElementById('sector-card-' + sec.id);
+  }
+  if (!el) {
+    if (msg) msg.textContent = 'Не найдено';
+    return;
+  }
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  el.classList.remove('search-highlight');
+  void el.offsetWidth;
+  el.classList.add('search-highlight');
+  setTimeout(function() { el.classList.remove('search-highlight'); }, 2500);
 }
 
 function editTaskInSector(sectorId, index) {

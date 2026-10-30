@@ -1,0 +1,8 @@
+{
+  "rules": {
+    "content": {
+      ".read": true,
+      ".write": "auth != null && auth.uid === 'tJqSbhZjNzL5Bm0vi7Umy8Kn3Vc2'"
+    }
+  }
+}

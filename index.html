@@ -31,7 +31,6 @@
             <div class="input-group">
               <label for="count-first">Количество вопросов:</label>
               <input type="number" id="count-first" min="1" max="300" value="20" class="question-count">
-              <span class="hint">от 1 до 300</span>
             </div>
           </div>
           <div class="action-row action-row-sub">
@@ -72,7 +71,6 @@
             <div class="input-group">
               <label for="count-highest">Количество вопросов:</label>
               <input type="number" id="count-highest" min="1" max="600" value="30" class="question-count">
-              <span class="hint">от 1 до 600</span>
             </div>
           </div>
           <div class="action-row action-row-sub">
@@ -127,6 +125,13 @@
       <div class="manage-toolbar hidden" id="toolbar-tasks">
         <button class="btn btn-primary" onclick="addSector()">+ Добавить сектор</button>
         <button class="btn btn-outline btn-danger-outline" onclick="clearAllInSection()">Очистить все</button>
+      </div>
+      <div class="manage-search" id="manage-search">
+        <label for="manage-search-input" id="manage-search-label">Перейти к вопросу №</label>
+        <input type="number" id="manage-search-input" class="question-count" min="1" placeholder="310"
+               onkeydown="if(event.key==='Enter'){event.preventDefault();goToNumber();}">
+        <button type="button" class="btn btn-outline" onclick="goToNumber()">Найти</button>
+        <span id="manage-search-msg" class="manage-search-msg"></span>
       </div>
       <div id="sectors-list" class="sectors-list hidden"></div>
 
